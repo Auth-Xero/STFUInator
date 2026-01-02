@@ -1,4 +1,4 @@
-package android.hardware.bluetooth.V1_0;
+package android.hardware.bluetooth.V1_1;
 
 import android.os.HidlSupport;
 import android.os.HwBinder;
@@ -11,11 +11,11 @@ import android.os.NativeHandle;
 /**
  * The interface from the Bluetooth Controller to the stack.
  */
-public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.IBase {
+public interface IBluetoothHciCallbacks extends android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks {
     /**
      * Fully-qualified interface name for this interface.
      */
-    public static final String kInterfaceName = "android.hardware.bluetooth@1.0::IBluetoothHciCallbacks";
+    public static final String kInterfaceName = "android.hardware.bluetooth@1.1::IBluetoothHciCallbacks";
 
     /**
      * Does a checked conversion from a binder to this class.
@@ -64,7 +64,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
      *
      */
     public static IBluetoothHciCallbacks getService(String serviceName, boolean retry) throws android.os.RemoteException {
-        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.0::IBluetoothHciCallbacks", serviceName, retry));
+        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.1::IBluetoothHciCallbacks", serviceName, retry));
     }
 
     /**
@@ -80,7 +80,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
      */
     @Deprecated
     public static IBluetoothHciCallbacks getService(String serviceName) throws android.os.RemoteException {
-        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.0::IBluetoothHciCallbacks", serviceName));
+        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.1::IBluetoothHciCallbacks", serviceName));
     }
 
     /**
@@ -93,29 +93,10 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
     }
 
     /**
-     * Invoked when the Bluetooth controller initialization has been
-     * completed.
+     * Send a ISO data packet form the controller to the host.
+     * @param data the ISO HCI packet to be passed to the host stack
      */
-    void initializationComplete(int status)
-        throws android.os.RemoteException;
-    /**
-     * This function is invoked when an HCI event is received from the
-     * Bluetooth controller to be forwarded to the Bluetooth stack.
-     * @param event is the HCI event to be sent to the Bluetooth stack.
-     */
-    void hciEventReceived(java.util.ArrayList<Byte> event)
-        throws android.os.RemoteException;
-    /**
-     * Send an ACL data packet form the controller to the host.
-     * @param data the ACL HCI packet to be passed to the host stack
-     */
-    void aclDataReceived(java.util.ArrayList<Byte> data)
-        throws android.os.RemoteException;
-    /**
-     * Send a SCO data packet form the controller to the host.
-     * @param data the SCO HCI packet to be passed to the host stack
-     */
-    void scoDataReceived(java.util.ArrayList<Byte> data)
+    void isoDataReceived(java.util.ArrayList<Byte> data)
         throws android.os.RemoteException;
     /*
      * Provides run-time type information for this object.
@@ -329,6 +310,24 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
             }
         }
 
+        // Methods from ::android::hardware::bluetooth::V1_1::IBluetoothHciCallbacks follow.
+        @Override
+        public void isoDataReceived(java.util.ArrayList<Byte> data)
+                throws android.os.RemoteException {
+            HwParcel _hidl_request = new HwParcel();
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks.kInterfaceName);
+            _hidl_request.writeInt8Vector(data);
+
+            HwParcel _hidl_reply = new HwParcel();
+            try {
+                mRemote.transact(5 /* isoDataReceived */, _hidl_request, _hidl_reply, 0 /* flags */);
+                _hidl_reply.verifySuccess();
+                _hidl_request.releaseTemporaryStorage();
+            } finally {
+                _hidl_reply.release();
+            }
+        }
+
         // Methods from ::android::hidl::base::V1_0::IBase follow.
         @Override
         public java.util.ArrayList<String> interfaceChain()
@@ -512,6 +511,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         @Override
         public final java.util.ArrayList<String> interfaceChain() {
             return new java.util.ArrayList<String>(java.util.Arrays.asList(
+                    android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks.kInterfaceName,
                     android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName,
                     android.internal.hidl.base.V1_0.IBase.kInterfaceName));
 
@@ -525,13 +525,14 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
 
         @Override
         public final String interfaceDescriptor() {
-            return android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName;
+            return android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks.kInterfaceName;
 
         }
 
         @Override
         public final java.util.ArrayList<byte[/* 32 */]> getHashChain() {
             return new java.util.ArrayList<byte[/* 32 */]>(java.util.Arrays.asList(
+                    new byte[/* 32 */]{64,-85,44,104,102,-63,-115,50,-70,-10,-28,-98,48,83,-108,-98,121,96,31,86,-106,58,121,30,-109,-26,-117,-98,-31,-113,113,-115} /* 40ab2c6866c18d32baf6e49e3053949e79601f56963a791e93e68b9ee18f718d */,
                     new byte[/* 32 */]{-125,95,65,-66,34,-127,-65,-78,47,62,51,-58,-6,-121,11,-34,123,-62,30,55,-27,-49,-70,-7,-93,111,-1,23,6,50,-9,84} /* 835f41be2281bfb22f3e33c6fa870bde7bc21e37e5cfbaf9a36fff170632f754 */,
                     new byte[/* 32 */]{-20,127,-41,-98,-48,45,-6,-123,-68,73,-108,38,-83,-82,62,-66,35,-17,5,36,-13,-51,105,87,19,-109,36,-72,59,24,-54,76} /* ec7fd79ed02dfa85bc499426adae3ebe23ef0524f3cd6957139324b83b18ca4c */));
 
@@ -636,6 +637,17 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
 
                     java.util.ArrayList<Byte> data = _hidl_request.readInt8Vector();
                     scoDataReceived(data);
+                    _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
+                    _hidl_reply.send();
+                    break;
+                }
+
+                case 5 /* isoDataReceived */:
+                {
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks.kInterfaceName);
+
+                    java.util.ArrayList<Byte> data = _hidl_request.readInt8Vector();
+                    isoDataReceived(data);
                     _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
                     _hidl_reply.send();
                     break;

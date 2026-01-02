@@ -32,13 +32,28 @@ class HciHidlHal extends android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.
      */
     static HciHidlHal create(IHciHalCallback callbacks) {
         android.hardware.bluetooth.V1_0.IBluetoothHci service;
+
+        // Try V1.1 first
+        try {
+            service = android.hardware.bluetooth.V1_1.IBluetoothHci.getService(true);
+            if (service != null) {
+                CourierLogger.d(TAG, "Found HIDL HAL V1.1");
+                return new HciHidlHal(service, callbacks);
+            }
+        } catch (NoSuchElementException e) {
+            CourierLogger.d(TAG, "HIDL HAL V1.1 not found");
+        } catch (RemoteException e) {
+            CourierLogger.w(TAG, "Exception from getService V1.1: " + e);
+        }
+
+        // Fall back to V1.0
         try {
             service = android.hardware.bluetooth.V1_0.IBluetoothHci.getService(true);
         } catch (NoSuchElementException e) {
             CourierLogger.d(TAG, "HIDL HAL V1.0 not found");
             return null;
         } catch (RemoteException e) {
-            CourierLogger.w(TAG, "Exception from getService: " + e);
+            CourierLogger.w(TAG, "Exception from getService V1.0: " + e);
             return null;
         }
         CourierLogger.d(TAG, "Found HIDL HAL V1.0");

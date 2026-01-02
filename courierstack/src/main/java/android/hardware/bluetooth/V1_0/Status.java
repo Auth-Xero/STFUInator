@@ -3,10 +3,9 @@ package android.hardware.bluetooth.V1_0;
 
 public final class Status {
     public static final int SUCCESS = 0;
-    public static final int TRANSPORT_ERROR = 1;
-    public static final int INITIALIZATION_ERROR = 2;
-    public static final int UNKNOWN = 3;
-    
+    public static final int TRANSPORT_ERROR = 1 /* ::android::hardware::bluetooth::V1_0::Status.SUCCESS implicitly + 1 */;
+    public static final int INITIALIZATION_ERROR = 2 /* ::android::hardware::bluetooth::V1_0::Status.TRANSPORT_ERROR implicitly + 1 */;
+    public static final int UNKNOWN = 3 /* ::android::hardware::bluetooth::V1_0::Status.INITIALIZATION_ERROR implicitly + 1 */;
     public static final String toString(int o) {
         if (o == SUCCESS) {
             return "SUCCESS";
@@ -44,4 +43,6 @@ public final class Status {
         }
         return String.join(" | ", list);
     }
-}
+
+};
+

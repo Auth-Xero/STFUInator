@@ -1,4 +1,4 @@
-package android.hardware.bluetooth.V1_0;
+package android.hardware.bluetooth.V1_1;
 
 import android.os.HidlSupport;
 import android.os.HwBinder;
@@ -9,18 +9,23 @@ import android.os.IHwInterface;
 import android.os.NativeHandle;
 
 /**
- * The interface from the Bluetooth Controller to the stack.
+ * The Host Controller Interface (HCI) is the layer defined by the Bluetooth
+ * specification between the software that runs on the host and the Bluetooth
+ * controller chip. This boundary is the natural choice for a Hardware
+ * Abstraction Layer (HAL). Dealing only in HCI packets and events simplifies
+ * the stack and abstracts away power management, initialization, and other
+ * implementation-specific details related to the hardware.
  */
-public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.IBase {
+public interface IBluetoothHci extends android.hardware.bluetooth.V1_0.IBluetoothHci {
     /**
      * Fully-qualified interface name for this interface.
      */
-    public static final String kInterfaceName = "android.hardware.bluetooth@1.0::IBluetoothHciCallbacks";
+    public static final String kInterfaceName = "android.hardware.bluetooth@1.1::IBluetoothHci";
 
     /**
      * Does a checked conversion from a binder to this class.
      */
-    /* package private */ static IBluetoothHciCallbacks asInterface(IHwBinder binder) {
+    /* package private */ static IBluetoothHci asInterface(IHwBinder binder) {
         if (binder == null) {
             return null;
         }
@@ -28,11 +33,11 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         IHwInterface iface =
                 binder.queryLocalInterface(kInterfaceName);
 
-        if ((iface != null) && (iface instanceof IBluetoothHciCallbacks)) {
-            return (IBluetoothHciCallbacks)iface;
+        if ((iface != null) && (iface instanceof IBluetoothHci)) {
+            return (IBluetoothHci)iface;
         }
 
-        IBluetoothHciCallbacks proxy = new IBluetoothHciCallbacks.Proxy(binder);
+        IBluetoothHci proxy = new IBluetoothHci.Proxy(binder);
 
         try {
             for (String descriptor : proxy.interfaceChain()) {
@@ -49,8 +54,8 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
     /**
      * Does a checked conversion from any interface to this class.
      */
-    public static IBluetoothHciCallbacks castFrom(IHwInterface iface) {
-        return (iface == null) ? null : IBluetoothHciCallbacks.asInterface(iface.asBinder());
+    public static IBluetoothHci castFrom(IHwInterface iface) {
+        return (iface == null) ? null : IBluetoothHci.asInterface(iface.asBinder());
     }
 
     @Override
@@ -63,14 +68,14 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
      * start.
      *
      */
-    public static IBluetoothHciCallbacks getService(String serviceName, boolean retry) throws android.os.RemoteException {
-        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.0::IBluetoothHciCallbacks", serviceName, retry));
+    public static IBluetoothHci getService(String serviceName, boolean retry) throws android.os.RemoteException {
+        return IBluetoothHci.asInterface(HwBinder.getService("android.hardware.bluetooth@1.1::IBluetoothHci", serviceName, retry));
     }
 
     /**
      * Calls getService("default",retry).
      */
-    public static IBluetoothHciCallbacks getService(boolean retry) throws android.os.RemoteException {
+    public static IBluetoothHci getService(boolean retry) throws android.os.RemoteException {
         return getService("default", retry);
     }
 
@@ -79,8 +84,8 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
      * started. See getService(String,boolean) instead.
      */
     @Deprecated
-    public static IBluetoothHciCallbacks getService(String serviceName) throws android.os.RemoteException {
-        return IBluetoothHciCallbacks.asInterface(HwBinder.getService("android.hardware.bluetooth@1.0::IBluetoothHciCallbacks", serviceName));
+    public static IBluetoothHci getService(String serviceName) throws android.os.RemoteException {
+        return IBluetoothHci.asInterface(HwBinder.getService("android.hardware.bluetooth@1.1::IBluetoothHci", serviceName));
     }
 
     /**
@@ -88,34 +93,22 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
      * started. See getService(boolean) instead.
      */
     @Deprecated
-    public static IBluetoothHciCallbacks getService() throws android.os.RemoteException {
+    public static IBluetoothHci getService() throws android.os.RemoteException {
         return getService("default");
     }
 
     /**
-     * Invoked when the Bluetooth controller initialization has been
-     * completed.
+     * Same as @1.0, but uses 1.1 Callbacks version
      */
-    void initializationComplete(int status)
+    void initialize_1_1(android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks callback)
         throws android.os.RemoteException;
     /**
-     * This function is invoked when an HCI event is received from the
-     * Bluetooth controller to be forwarded to the Bluetooth stack.
-     * @param event is the HCI event to be sent to the Bluetooth stack.
+     * Send an ISO data packet (as specified in the Bluetooth Core
+     * Specification v5.2) to the Bluetooth controller.
+     * Packets must be processed in order.
+     * @param data HCI data packet to be sent
      */
-    void hciEventReceived(java.util.ArrayList<Byte> event)
-        throws android.os.RemoteException;
-    /**
-     * Send an ACL data packet form the controller to the host.
-     * @param data the ACL HCI packet to be passed to the host stack
-     */
-    void aclDataReceived(java.util.ArrayList<Byte> data)
-        throws android.os.RemoteException;
-    /**
-     * Send a SCO data packet form the controller to the host.
-     * @param data the SCO HCI packet to be passed to the host stack
-     */
-    void scoDataReceived(java.util.ArrayList<Byte> data)
+    void sendIsoData(java.util.ArrayList<Byte> data)
         throws android.os.RemoteException;
     /*
      * Provides run-time type information for this object.
@@ -228,7 +221,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
     boolean unlinkToDeath(IHwBinder.DeathRecipient recipient)
         throws android.os.RemoteException;
 
-    public static final class Proxy implements IBluetoothHciCallbacks {
+    public static final class Proxy implements IBluetoothHci {
         private IHwBinder mRemote;
 
         public Proxy(IHwBinder remote) {
@@ -247,7 +240,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
             } catch (android.os.RemoteException ex) {
                 /* ignored; handled below. */
             }
-            return "[class or subclass of " + IBluetoothHciCallbacks.kInterfaceName + "]@Proxy";
+            return "[class or subclass of " + IBluetoothHci.kInterfaceName + "]@Proxy";
         }
 
         @Override
@@ -260,17 +253,17 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
             return this.asBinder().hashCode();
         }
 
-        // Methods from ::android::hardware::bluetooth::V1_0::IBluetoothHciCallbacks follow.
+        // Methods from ::android::hardware::bluetooth::V1_0::IBluetoothHci follow.
         @Override
-        public void initializationComplete(int status)
+        public void initialize(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks callback)
                 throws android.os.RemoteException {
             HwParcel _hidl_request = new HwParcel();
-            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
-            _hidl_request.writeInt32(status);
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
+            _hidl_request.writeStrongBinder(callback == null ? null : callback.asBinder());
 
             HwParcel _hidl_reply = new HwParcel();
             try {
-                mRemote.transact(1 /* initializationComplete */, _hidl_request, _hidl_reply, 0 /* flags */);
+                mRemote.transact(1 /* initialize */, _hidl_request, _hidl_reply, 0 /* flags */);
                 _hidl_reply.verifySuccess();
                 _hidl_request.releaseTemporaryStorage();
             } finally {
@@ -279,15 +272,15 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         }
 
         @Override
-        public void hciEventReceived(java.util.ArrayList<Byte> event)
+        public void sendHciCommand(java.util.ArrayList<Byte> command)
                 throws android.os.RemoteException {
             HwParcel _hidl_request = new HwParcel();
-            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
-            _hidl_request.writeInt8Vector(event);
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
+            _hidl_request.writeInt8Vector(command);
 
             HwParcel _hidl_reply = new HwParcel();
             try {
-                mRemote.transact(2 /* hciEventReceived */, _hidl_request, _hidl_reply, 0 /* flags */);
+                mRemote.transact(2 /* sendHciCommand */, _hidl_request, _hidl_reply, 0 /* flags */);
                 _hidl_reply.verifySuccess();
                 _hidl_request.releaseTemporaryStorage();
             } finally {
@@ -296,15 +289,15 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         }
 
         @Override
-        public void aclDataReceived(java.util.ArrayList<Byte> data)
+        public void sendAclData(java.util.ArrayList<Byte> data)
                 throws android.os.RemoteException {
             HwParcel _hidl_request = new HwParcel();
-            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
             _hidl_request.writeInt8Vector(data);
 
             HwParcel _hidl_reply = new HwParcel();
             try {
-                mRemote.transact(3 /* aclDataReceived */, _hidl_request, _hidl_reply, 0 /* flags */);
+                mRemote.transact(3 /* sendAclData */, _hidl_request, _hidl_reply, 0 /* flags */);
                 _hidl_reply.verifySuccess();
                 _hidl_request.releaseTemporaryStorage();
             } finally {
@@ -313,15 +306,66 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         }
 
         @Override
-        public void scoDataReceived(java.util.ArrayList<Byte> data)
+        public void sendScoData(java.util.ArrayList<Byte> data)
                 throws android.os.RemoteException {
             HwParcel _hidl_request = new HwParcel();
-            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
             _hidl_request.writeInt8Vector(data);
 
             HwParcel _hidl_reply = new HwParcel();
             try {
-                mRemote.transact(4 /* scoDataReceived */, _hidl_request, _hidl_reply, 0 /* flags */);
+                mRemote.transact(4 /* sendScoData */, _hidl_request, _hidl_reply, 0 /* flags */);
+                _hidl_reply.verifySuccess();
+                _hidl_request.releaseTemporaryStorage();
+            } finally {
+                _hidl_reply.release();
+            }
+        }
+
+        @Override
+        public void close()
+                throws android.os.RemoteException {
+            HwParcel _hidl_request = new HwParcel();
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
+
+            HwParcel _hidl_reply = new HwParcel();
+            try {
+                mRemote.transact(5 /* close */, _hidl_request, _hidl_reply, 0 /* flags */);
+                _hidl_reply.verifySuccess();
+                _hidl_request.releaseTemporaryStorage();
+            } finally {
+                _hidl_reply.release();
+            }
+        }
+
+        // Methods from ::android::hardware::bluetooth::V1_1::IBluetoothHci follow.
+        @Override
+        public void initialize_1_1(android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks callback)
+                throws android.os.RemoteException {
+            HwParcel _hidl_request = new HwParcel();
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName);
+            _hidl_request.writeStrongBinder(callback == null ? null : callback.asBinder());
+
+            HwParcel _hidl_reply = new HwParcel();
+            try {
+                mRemote.transact(6 /* initialize_1_1 */, _hidl_request, _hidl_reply, 0 /* flags */);
+                _hidl_reply.verifySuccess();
+                _hidl_request.releaseTemporaryStorage();
+            } finally {
+                _hidl_reply.release();
+            }
+        }
+
+        @Override
+        public void sendIsoData(java.util.ArrayList<Byte> data)
+                throws android.os.RemoteException {
+            HwParcel _hidl_request = new HwParcel();
+            _hidl_request.writeInterfaceToken(android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName);
+            _hidl_request.writeInt8Vector(data);
+
+            HwParcel _hidl_reply = new HwParcel();
+            try {
+                mRemote.transact(7 /* sendIsoData */, _hidl_request, _hidl_reply, 0 /* flags */);
                 _hidl_reply.verifySuccess();
                 _hidl_request.releaseTemporaryStorage();
             } finally {
@@ -503,7 +547,7 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         }
     }
 
-    public static abstract class Stub extends HwBinder implements IBluetoothHciCallbacks {
+    public static abstract class Stub extends HwBinder implements IBluetoothHci {
         @Override
         public IHwBinder asBinder() {
             return this;
@@ -512,7 +556,8 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         @Override
         public final java.util.ArrayList<String> interfaceChain() {
             return new java.util.ArrayList<String>(java.util.Arrays.asList(
-                    android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName,
+                    android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName,
+                    android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName,
                     android.internal.hidl.base.V1_0.IBase.kInterfaceName));
 
         }
@@ -525,14 +570,15 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
 
         @Override
         public final String interfaceDescriptor() {
-            return android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName;
+            return android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName;
 
         }
 
         @Override
         public final java.util.ArrayList<byte[/* 32 */]> getHashChain() {
             return new java.util.ArrayList<byte[/* 32 */]>(java.util.Arrays.asList(
-                    new byte[/* 32 */]{-125,95,65,-66,34,-127,-65,-78,47,62,51,-58,-6,-121,11,-34,123,-62,30,55,-27,-49,-70,-7,-93,111,-1,23,6,50,-9,84} /* 835f41be2281bfb22f3e33c6fa870bde7bc21e37e5cfbaf9a36fff170632f754 */,
+                    new byte[/* 32 */]{54,47,-47,-62,22,65,-62,34,79,59,-128,-61,13,-105,-105,-71,-120,-6,63,52,66,67,-43,49,-70,115,-59,83,119,-102,87,99} /* 362fd1c21641c2224f3b80c30d9797b988fa3f344243d531ba73c553779a5763 */,
+                    new byte[/* 32 */]{52,124,-25,70,-127,86,7,86,127,95,59,83,-28,-128,9,-104,-54,90,-71,53,81,65,-16,-120,15,-64,-49,12,31,-59,-61,85} /* 347ce746815607567f5f3b53e4800998ca5ab9355141f0880fc0cf0c1fc5c355 */,
                     new byte[/* 32 */]{-20,127,-41,-98,-48,45,-6,-123,-68,73,-108,38,-83,-82,62,-66,35,-17,5,36,-13,-51,105,87,19,-109,36,-72,59,24,-54,76} /* ec7fd79ed02dfa85bc499426adae3ebe23ef0524f3cd6957139324b83b18ca4c */));
 
         }
@@ -597,45 +643,77 @@ public interface IBluetoothHciCallbacks extends android.internal.hidl.base.V1_0.
         public void onTransact(int _hidl_code, HwParcel _hidl_request, final HwParcel _hidl_reply, int _hidl_flags)
                 throws android.os.RemoteException {
             switch (_hidl_code) {
-                case 1 /* initializationComplete */:
+                case 1 /* initialize */:
                 {
-                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
 
-                    int status = _hidl_request.readInt32();
-                    initializationComplete(status);
+                    android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks callback = android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.asInterface(_hidl_request.readStrongBinder());
+                    initialize(callback);
                     _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
                     _hidl_reply.send();
                     break;
                 }
 
-                case 2 /* hciEventReceived */:
+                case 2 /* sendHciCommand */:
                 {
-                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
 
-                    java.util.ArrayList<Byte> event = _hidl_request.readInt8Vector();
-                    hciEventReceived(event);
+                    java.util.ArrayList<Byte> command = _hidl_request.readInt8Vector();
+                    sendHciCommand(command);
                     _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
                     _hidl_reply.send();
                     break;
                 }
 
-                case 3 /* aclDataReceived */:
+                case 3 /* sendAclData */:
                 {
-                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
 
                     java.util.ArrayList<Byte> data = _hidl_request.readInt8Vector();
-                    aclDataReceived(data);
+                    sendAclData(data);
                     _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
                     _hidl_reply.send();
                     break;
                 }
 
-                case 4 /* scoDataReceived */:
+                case 4 /* sendScoData */:
                 {
-                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHciCallbacks.kInterfaceName);
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
 
                     java.util.ArrayList<Byte> data = _hidl_request.readInt8Vector();
-                    scoDataReceived(data);
+                    sendScoData(data);
+                    _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
+                    _hidl_reply.send();
+                    break;
+                }
+
+                case 5 /* close */:
+                {
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_0.IBluetoothHci.kInterfaceName);
+
+                    close();
+                    _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
+                    _hidl_reply.send();
+                    break;
+                }
+
+                case 6 /* initialize_1_1 */:
+                {
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName);
+
+                    android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks callback = android.hardware.bluetooth.V1_1.IBluetoothHciCallbacks.asInterface(_hidl_request.readStrongBinder());
+                    initialize_1_1(callback);
+                    _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
+                    _hidl_reply.send();
+                    break;
+                }
+
+                case 7 /* sendIsoData */:
+                {
+                    _hidl_request.enforceInterface(android.hardware.bluetooth.V1_1.IBluetoothHci.kInterfaceName);
+
+                    java.util.ArrayList<Byte> data = _hidl_request.readInt8Vector();
+                    sendIsoData(data);
                     _hidl_reply.writeStatus(HwParcel.STATUS_SUCCESS);
                     _hidl_reply.send();
                     break;

@@ -1,4 +1,6 @@
-
+/*
+ * This file is auto-generated.  DO NOT MODIFY.
+ */
 package android.hardware.bluetooth;
 public @interface Status {
   public static final int SUCCESS = 0;

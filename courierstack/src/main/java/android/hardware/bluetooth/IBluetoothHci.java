@@ -1,4 +1,6 @@
-
+/*
+ * This file is auto-generated.  DO NOT MODIFY.
+ */
 package android.hardware.bluetooth;
 
 import java.lang.reflect.InvocationTargetException;
@@ -6,7 +8,7 @@ import java.lang.reflect.Method;
 
 public interface IBluetoothHci extends android.os.IInterface
 {
-  
+  /** Default implementation for IBluetoothHci. */
   public static class Default implements android.hardware.bluetooth.IBluetoothHci
   {
     @Override public void close() throws android.os.RemoteException
@@ -32,10 +34,10 @@ public interface IBluetoothHci extends android.os.IInterface
       return null;
     }
   }
-  
+  /** Local-side IPC implementation stub class. */
   public static abstract class Stub extends android.os.Binder implements android.hardware.bluetooth.IBluetoothHci
   {
-    
+    /** Construct the stub at attach it to the interface. */
     public Stub()
     {
       //this.markVintfStability();
@@ -47,7 +49,10 @@ public interface IBluetoothHci extends android.os.IInterface
       }
       this.attachInterface(this, DESCRIPTOR);
     }
-    
+    /**
+     * Cast an IBinder object into an android.hardware.bluetooth.IBluetoothHci interface,
+     * generating a proxy if needed.
+     */
     public static android.hardware.bluetooth.IBluetoothHci asInterface(android.os.IBinder obj)
     {
       if ((obj==null)) {
