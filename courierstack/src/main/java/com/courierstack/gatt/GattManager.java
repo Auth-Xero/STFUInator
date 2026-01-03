@@ -1,6 +1,6 @@
 package com.courierstack.gatt;
 
-import com.courierstack.core.CourierLogger;
+import com.courierstack.util.CourierLogger;
 import com.courierstack.l2cap.AclConnection;
 import com.courierstack.l2cap.ConnectionType;
 import com.courierstack.l2cap.IL2capListener;

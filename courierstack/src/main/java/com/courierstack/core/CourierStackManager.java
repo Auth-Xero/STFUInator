@@ -5,14 +5,16 @@ import android.content.Context;
 import com.courierstack.hci.HciCommandManager;
 import com.courierstack.hci.HciCommands;
 import com.courierstack.hci.HciErrorCode;
+import com.courierstack.util.CourierLogger;
+import com.courierstack.util.LogEntry;
+import com.courierstack.util.LogType;
+import com.courierstack.hal.HalManager;
 
 import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;

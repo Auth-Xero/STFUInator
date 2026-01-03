@@ -2,7 +2,7 @@ package com.courierstack.rfcomm;
 
 import android.content.Context;
 
-import com.courierstack.core.CourierLogger;
+import com.courierstack.util.CourierLogger;
 import com.courierstack.hci.HciCommandManager;
 import com.courierstack.l2cap.AclConnection;
 import com.courierstack.l2cap.IL2capConnectionCallback;

@@ -70,13 +70,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
-import com.courierstack.avdtp.AudioStreamer
-import com.courierstack.avdtp.AvdtpConstants
-import com.courierstack.avdtp.AvdtpManager
-import com.courierstack.avdtp.IAvdtpListener
-import com.courierstack.avdtp.StreamEndpoint
-import com.courierstack.codec.SbcCodec
-import com.courierstack.core.CourierLogger
+import com.courierstack.a2dp.avdtp.AudioStreamer
+import com.courierstack.a2dp.avdtp.AvdtpConstants
+import com.courierstack.a2dp.avdtp.AvdtpManager
+import com.courierstack.a2dp.avdtp.IAvdtpListener
+import com.courierstack.a2dp.avdtp.StreamEndpoint
+import com.courierstack.a2dp.codec.SbcCodec
+import com.courierstack.util.CourierLogger
 import com.courierstack.core.CourierStackManager
 import com.courierstack.gatt.GattCharacteristic
 import com.courierstack.gatt.GattDescriptor
@@ -90,17 +90,17 @@ import com.courierstack.l2cap.IL2capConnectionCallback
 import com.courierstack.l2cap.IL2capListener
 import com.courierstack.l2cap.L2capChannel
 import com.courierstack.l2cap.L2capManager
-import com.courierstack.pairing.BondingInfo
-import com.courierstack.pairing.IPairingListener
-import com.courierstack.pairing.PairingManager
-import com.courierstack.pairing.PairingMode
-import com.courierstack.scan.IScanListener
-import com.courierstack.scan.ScannedDevice
-import com.courierstack.scan.ScannerManager
+import com.courierstack.security.bredr.BondingInfo
+import com.courierstack.security.bredr.IBrEdrPairingListener
+import com.courierstack.security.bredr.BrEdrPairingManager
+import com.courierstack.security.bredr.BrEdrPairingMode
+import com.courierstack.gap.IDiscoveryListener
+import com.courierstack.gap.DiscoveredDevice
+import com.courierstack.gap.DeviceDiscovery
 import com.courierstack.sdp.SdpManager
-import com.courierstack.smp.ISmpListener
-import com.courierstack.smp.SmpConstants
-import com.courierstack.smp.SmpManager
+import com.courierstack.security.le.ISmpListener
+import com.courierstack.security.le.SmpConstants
+import com.courierstack.security.le.SmpManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -117,7 +117,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import com.courierstack.smp.BondingInfo as SmpBondingInfo
+import com.courierstack.security.le.BondingInfo as SmpBondingInfo
 
 
 val NeonGreen = Color(0xFF39FF14)
@@ -239,8 +239,8 @@ class MainActivity : ComponentActivity() {
 
     private var courierStack: CourierStackManager? = null
     private var l2capManager: L2capManager? = null
-    private var scannerManager: ScannerManager? = null
-    private var pairingManager: PairingManager? = null
+    private var scannerManager: DeviceDiscovery? = null
+    private var pairingManager: BrEdrPairingManager? = null
     private var smpManager: SmpManager? = null
     private var gattManager: GattManager? = null
     private var avdtpManager: AvdtpManager? = null
@@ -253,14 +253,14 @@ class MainActivity : ComponentActivity() {
     private var stackInitialized by mutableStateOf(false)
 
 
-    private val scannedDevices = mutableStateMapOf<String, ScannedDevice>()
+    private val scannedDevices = mutableStateMapOf<String, DiscoveredDevice>()
     private var isScanning by mutableStateOf(false)
     private var hasPermissions by mutableStateOf(false)
 
 
     private var isAttacking by mutableStateOf(false)
     private var attackPaused by mutableStateOf(false)
-    private var attackTarget by mutableStateOf<ScannedDevice?>(null)
+    private var attackTarget by mutableStateOf<DiscoveredDevice?>(null)
     private var attackMethod by mutableStateOf<AttackMethod?>(null)
     private var attackStats by mutableStateOf(AttackStats())
     private var attackJob: Job? = null
@@ -271,7 +271,7 @@ class MainActivity : ComponentActivity() {
     private var selectedAudioUri by mutableStateOf<Uri?>(null)
     private var selectedAudioName by mutableStateOf<String?>(null)
     private var audioBytes: ByteArray? = null
-    private var pendingAudioAttackDevice: ScannedDevice? = null
+    private var pendingAudioAttackDevice: DiscoveredDevice? = null
     private var audioVolumeGain by mutableStateOf(2.0f)
 
 
@@ -332,8 +332,8 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private val scanListener = object : IScanListener {
-        override fun onDeviceFound(device: ScannedDevice) {
+    private val scanListener = object : IDiscoveryListener {
+        override fun onDeviceFound(device: DiscoveredDevice) {
 
             val modeInfo = when {
                 device.isDualMode() -> "LE+BR/EDR (Dual-Mode)"
@@ -362,7 +362,7 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private val pairingListener = object : IPairingListener {
+    private val pairingListener = object : IBrEdrPairingListener {
         override fun onPairingStarted(handle: Int, address: ByteArray) {
             FileLogger.i(TAG, "Pairing started: ${formatAddress(address)}")
         }
@@ -666,14 +666,14 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) {
                     stackStatusMessages.add("Initializing scanner...")
                 }
-                scannerManager = ScannerManager(l2capManager!!.hciManager)
+                scannerManager = DeviceDiscovery(l2capManager!!.hciManager)
                 scannerManager!!.addListener(scanListener)
 
 
                 withContext(Dispatchers.Main) {
                     stackStatusMessages.add("Initializing pairing manager...")
                 }
-                pairingManager = PairingManager(l2capManager!!, pairingListener)
+                pairingManager = BrEdrPairingManager(l2capManager!!, pairingListener)
                 pairingManager!!.initialize()
 
 
@@ -804,7 +804,7 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private fun startAttack(device: ScannedDevice, method: AttackMethod) {
+    private fun startAttack(device: DiscoveredDevice, method: AttackMethod) {
         if (isAttacking) return
 
         stopScan()
@@ -853,7 +853,7 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private suspend fun executeL2capFlood(device: ScannedDevice) {
+    private suspend fun executeL2capFlood(device: DiscoveredDevice) {
         val l2cap = l2capManager ?: return
 
         FileLogger.i(TAG, "Starting LE L2CAP flood attack on ${device.address}")
@@ -1027,7 +1027,7 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private suspend fun executeAudioInject(device: ScannedDevice) {
+    private suspend fun executeAudioInject(device: DiscoveredDevice) {
         val l2cap = l2capManager ?: return
         val avdtp = avdtpManager ?: return
         val codec = sbcCodec ?: return
@@ -1129,7 +1129,7 @@ class MainActivity : ComponentActivity() {
         FileLogger.i(TAG, "Proceeding with BR/EDR connection for AVDTP to $targetAddress")
 
 
-        pairing.setDefaultPairingMode(PairingMode.JUST_WORKS)
+        pairing.setDefaultPairingMode(BrEdrPairingMode.JUST_WORKS)
         pairing.setAutoAccept(true)
         pairing.enableSsp()
         delay(300)
@@ -1515,7 +1515,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    
+
     private suspend fun resolveIdentityAddressViaSmp(
         l2cap: L2capManager,
         smp: SmpManager,
@@ -1664,12 +1664,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun pickAudioFile(device: ScannedDevice) {
+    private fun pickAudioFile(device: DiscoveredDevice) {
         pendingAudioAttackDevice = device
         audioPickerLauncher.launch("audio/*")
     }
 
-    private fun launchAudioAttack(device: ScannedDevice) {
+    private fun launchAudioAttack(device: DiscoveredDevice) {
         FileLogger.i(TAG, "Starting audio attack with volume gain: ${audioVolumeGain}x")
         stopScan()
         attackTarget = device
@@ -1731,12 +1731,12 @@ fun STFUinatorApp(
     initState: CourierStackManager.State,
     statusMessages: List<String>,
     stackInitialized: Boolean,
-    scannedDevices: List<ScannedDevice>,
+    scannedDevices: List<DiscoveredDevice>,
     isScanning: Boolean,
     hasPermissions: Boolean,
     isAttacking: Boolean,
     attackPaused: Boolean,
-    attackTarget: ScannedDevice?,
+    attackTarget: DiscoveredDevice?,
     attackMethod: AttackMethod?,
     attackStats: AttackStats,
     selectedAudioName: String?,
@@ -1746,7 +1746,7 @@ fun STFUinatorApp(
     onRequestPermissions: () -> Unit,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
-    onDeviceClick: (ScannedDevice, AttackMethod) -> Unit,
+    onDeviceClick: (DiscoveredDevice, AttackMethod) -> Unit,
     onPauseAttack: () -> Unit,
     onResumeAttack: () -> Unit,
     onStopAttack: () -> Unit,
@@ -1903,13 +1903,13 @@ fun InitializationScreen(
 
 @Composable
 fun MainScreen(
-    devices: List<ScannedDevice>,
+    devices: List<DiscoveredDevice>,
     isScanning: Boolean,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
-    onDeviceClick: (ScannedDevice, AttackMethod) -> Unit
+    onDeviceClick: (DiscoveredDevice, AttackMethod) -> Unit
 ) {
-    var selectedDevice by remember { mutableStateOf<ScannedDevice?>(null) }
+    var selectedDevice by remember { mutableStateOf<DiscoveredDevice?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Scan controls
@@ -1960,7 +1960,7 @@ fun MainScreen(
 }
 
 @Composable
-fun DeviceCard(device: ScannedDevice, onClick: () -> Unit) {
+fun DeviceCard(device: DiscoveredDevice, onClick: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -2024,7 +2024,7 @@ fun DeviceCard(device: ScannedDevice, onClick: () -> Unit) {
 
 @Composable
 fun AttackMethodDialog(
-    device: ScannedDevice,
+    device: DiscoveredDevice,
     onDismiss: () -> Unit,
     onMethodSelected: (AttackMethod) -> Unit
 ) {
@@ -2082,7 +2082,7 @@ fun AttackMethodDialog(
 
 @Composable
 fun AttackScreen(
-    target: ScannedDevice?,
+    target: DiscoveredDevice?,
     method: AttackMethod?,
     stats: AttackStats,
     isPaused: Boolean,

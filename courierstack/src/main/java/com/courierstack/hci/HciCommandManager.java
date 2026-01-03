@@ -1,10 +1,10 @@
 package com.courierstack.hci;
 
-import com.courierstack.core.CourierLogger;
+import com.courierstack.hal.IBluetoothHal;
+import com.courierstack.hal.IBluetoothHalCallback;
+import com.courierstack.util.CourierLogger;
 
 import java.io.Closeable;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -42,7 +42,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <p>Thread safety: This class is thread-safe. Commands may be sent from any thread.
  */
-public class HciCommandManager implements IHciHalCallback, Closeable {
+public class HciCommandManager implements IBluetoothHalCallback, Closeable {
 
     private static final String TAG = "HciCommandManager";
     private static final long DEFAULT_TIMEOUT_MS = 5000;
@@ -52,7 +52,7 @@ public class HciCommandManager implements IHciHalCallback, Closeable {
     private static final int EVT_COMMAND_COMPLETE = 0x0E;
     private static final int EVT_COMMAND_STATUS = 0x0F;
 
-    private final IHciHal mHal;
+    private final IBluetoothHal mHal;
     private final IHciCommandListener mPrimaryListener;
     private final List<IHciCommandListener> mAdditionalListeners;
     private final ExecutorService mExecutor;
@@ -78,7 +78,7 @@ public class HciCommandManager implements IHciHalCallback, Closeable {
         });
         mPendingCommands = new ConcurrentHashMap<>();
         mSyncCommandLock = new ReentrantLock(true);
-        mHal = IHciHal.create(this);
+        mHal = IBluetoothHal.create(this);
     }
 
     /**

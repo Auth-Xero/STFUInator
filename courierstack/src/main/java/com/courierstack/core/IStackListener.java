@@ -1,5 +1,7 @@
 package com.courierstack.core;
 
+import com.courierstack.util.LogEntry;
+
 /**
  * Listener interface for stack-level events.
  *

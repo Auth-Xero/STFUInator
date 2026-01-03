@@ -2,7 +2,7 @@ package com.courierstack.l2cap;
 
 import android.content.Context;
 
-import com.courierstack.core.CourierLogger;
+import com.courierstack.util.CourierLogger;
 import com.courierstack.hci.HciCommandManager;
 import com.courierstack.hci.HciCommands;
 import com.courierstack.hci.HciErrorCode;
