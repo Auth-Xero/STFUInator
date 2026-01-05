@@ -258,6 +258,19 @@ public class SdpManager implements IL2capListener {
     }
 
     /**
+     * Returns the internal SDP database.
+     *
+     * <p>Use this to register service records that will be served by this
+     * SDP server. Service records should be registered before or after
+     * calling {@link #startServer()}.
+     *
+     * @return the SDP database
+     */
+    public SdpDatabase getDatabase() {
+        return mDatabase;
+    }
+
+    /**
      * Shuts down the SDP manager.
      */
     public void shutdown() {
@@ -285,12 +298,6 @@ public class SdpManager implements IL2capListener {
         return mInitialized.get();
     }
 
-    /**
-     * Returns the local service database.
-     */
-    public SdpDatabase getDatabase() {
-        return mDatabase;
-    }
 
     // ==================== Service Registration ====================
 

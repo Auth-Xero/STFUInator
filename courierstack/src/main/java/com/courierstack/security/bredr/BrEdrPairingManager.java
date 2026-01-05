@@ -87,6 +87,9 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
     /** Force legacy PIN pairing by rejecting SSP. */
     private volatile boolean mForceLegacyPairing = false;
 
+    /** Optional persistent storage for bonding info. */
+    private volatile IBondingStorage mBondingStorage;
+
     // ==================== Constructor ====================
 
     /**
@@ -131,8 +134,34 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
             mHciManager.addListener(this);
         }
 
+        // Load persisted bonding info if storage is configured
+        if (mBondingStorage != null) {
+            Map<String, BondingInfo> persisted = mBondingStorage.loadAll();
+            mBondingDatabase.putAll(persisted);
+            mListener.onMessage("Loaded " + persisted.size() + " bonded devices from storage");
+        }
+
         mListener.onMessage("Pairing Manager initialized");
         return true;
+    }
+
+    /**
+     * Sets the persistent storage for bonding information.
+     *
+     * <p>Call this BEFORE initialize() to load persisted bonds on startup.
+     * If not set, bonding info is only kept in memory and lost on restart.
+     *
+     * @param storage bonding storage implementation
+     */
+    public void setBondingStorage(IBondingStorage storage) {
+        mBondingStorage = storage;
+
+        // If already initialized, load persisted bonds now
+        if (mInitialized.get() && storage != null) {
+            Map<String, BondingInfo> persisted = storage.loadAll();
+            mBondingDatabase.putAll(persisted);
+            mListener.onMessage("Loaded " + persisted.size() + " bonded devices from storage");
+        }
     }
 
     private void checkInitialized() {
@@ -604,21 +633,39 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
     /**
      * Stores bonding information.
      *
+     * <p>If persistent storage is configured, the bonding info is also
+     * saved to durable storage for reconnection after app restart.
+     *
      * @param info bonding info to store
      */
     public void storeBondingInfo(BondingInfo info) {
         Objects.requireNonNull(info, "info must not be null");
         mBondingDatabase.put(info.getAddressString(), info);
+
+        // Persist to storage if configured
+        if (mBondingStorage != null) {
+            mBondingStorage.store(info);
+        }
     }
 
     /**
      * Removes stored bonding info for address.
      *
+     * <p>Also removes from persistent storage if configured.
+     *
      * @param address peer address
      * @return removed bonding info or null
      */
     public BondingInfo removeBondingInfo(byte[] address) {
-        return mBondingDatabase.remove(BrEdrPairingConstants.formatAddress(address));
+        String addrStr = BrEdrPairingConstants.formatAddress(address);
+        BondingInfo removed = mBondingDatabase.remove(addrStr);
+
+        // Remove from persistent storage if configured
+        if (mBondingStorage != null) {
+            mBondingStorage.remove(addrStr);
+        }
+
+        return removed;
     }
 
     /**
@@ -1074,7 +1121,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
                         .linkKeyType(keyType)
                         .authenticated(BrEdrPairingConstants.isMitmProtected(keyType))
                         .build();
-                mBondingDatabase.put(BrEdrPairingConstants.formatAddress(addr), info);
+                storeBondingInfo(info);
                 mListener.onMessage("Link key received (no session), type=" + BrEdrPairingConstants.getLinkKeyTypeString(keyType));
                 return;
             }
@@ -1097,7 +1144,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
                 .linkKeyType(keyType)
                 .authenticated(session.authenticated)
                 .build();
-        mBondingDatabase.put(BrEdrPairingConstants.formatAddress(addr), info);
+        storeBondingInfo(info);
 
         mListener.onMessage("Link key received, type=" + BrEdrPairingConstants.getLinkKeyTypeString(keyType));
     }

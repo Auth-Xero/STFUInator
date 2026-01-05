@@ -726,6 +726,9 @@ public class L2capManager implements IHciCommandListener, Closeable {
             case 0x03: // Connection Complete
                 handleConnectionComplete(event);
                 break;
+            case 0x04: // Connection Request
+                handleHciConnectionRequest(event);
+                break;
             case 0x05: // Disconnection Complete
                 handleDisconnectionComplete(event);
                 break;
@@ -840,6 +843,48 @@ public class L2capManager implements IHciCommandListener, Closeable {
             if (callback != null) {
                 callback.onFailure(reason);
             }
+        }
+    }
+
+    /**
+     * Handles HCI Connection_Request event (0x04).
+     *
+     * <p>This event is sent by the controller when a remote device wants to
+     * create an ACL connection. We must respond with Accept_Connection_Request
+     * or Reject_Connection_Request within the connection accept timeout.
+     *
+     * @param event HCI event data
+     */
+    private void handleHciConnectionRequest(byte[] event) {
+        // Event format: [event_code(1), length(1), BD_ADDR(6), CoD(3), link_type(1)]
+        // Total: 12 bytes
+        if (event.length < 12) return;
+
+        byte[] addr = new byte[6];
+        System.arraycopy(event, 2, addr, 0, 6);
+
+        int cod = (event[8] & 0xFF) | ((event[9] & 0xFF) << 8) | ((event[10] & 0xFF) << 16);
+        int linkType = event[11] & 0xFF;
+
+        String addrStr = formatAddress(addr);
+        CourierLogger.i(TAG, "Connection Request: addr=" + addrStr +
+                ", CoD=0x" + Integer.toHexString(cod) + ", linkType=" + linkType);
+
+        // Accept the connection as Slave (role = 0x01)
+        // Role: 0x00 = Master, 0x01 = Slave
+        // For HID devices, we typically accept as Slave since the host initiates
+        byte[] cmd = new byte[10];
+        cmd[0] = 0x09;  // Accept_Connection_Request opcode LSB
+        cmd[1] = 0x04;  // Accept_Connection_Request opcode MSB (OGF=1, OCF=0x009)
+        cmd[2] = 7;     // Parameter length
+        System.arraycopy(addr, 0, cmd, 3, 6);  // BD_ADDR
+        cmd[9] = 0x01;  // Role = Slave
+
+        if (mHciManager != null) {
+            mHciManager.sendCommand(cmd);
+            CourierLogger.i(TAG, "Accepted connection from " + addrStr + " as Slave");
+        } else {
+            CourierLogger.e(TAG, "Cannot accept connection - HCI manager not available");
         }
     }
 
@@ -1204,6 +1249,15 @@ public class L2capManager implements IHciCommandListener, Closeable {
         rsp.putShort((short) 0); // Flags
         rsp.putShort((short) L2capConstants.CONF_SUCCESS);
         sendL2capData(conn.handle, L2capConstants.CID_SIGNALING, rsp.array());
+
+        // For server (incoming) connections, we also need to send our own Config Request
+        // if we haven't already. L2CAP configuration is bidirectional - both sides must
+        // send a Config Request and receive a Config Response.
+        if (!channel.isLocalConfigDone()) {
+            CourierLogger.d(TAG, "Sending our Config Request for server channel localCid=0x" +
+                    Integer.toHexString(destCid));
+            sendConfigReq(channel);
+        }
 
         checkChannelOpen(channel);
     }
