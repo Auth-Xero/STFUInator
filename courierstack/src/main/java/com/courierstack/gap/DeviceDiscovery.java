@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>Usage:
  * <pre>{@code
- * ScannerManager scanner = new ScannerManager(hciManager);
+ * DeviceDiscovery scanner = new DeviceDiscovery(hciManager);
  * scanner.addListener(device -> {
  *     Log.d("Scan", "Found: " + device);
  * });
@@ -49,7 +49,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * scanner.startDualScan();
  *
  * // Get discovered devices
- * List<ScannedDevice> devices = scanner.getDevices();
+ * List<DiscoveredDevice> devices = scanner.getDevices();
  *
  * // Stop scanning
  * scanner.stopAllScans();
@@ -60,7 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class DeviceDiscovery implements IHciCommandListener, Closeable {
 
-    private static final String TAG = "ScannerManager";
+    private static final String TAG = "DeviceDiscovery";
     private static final long EXECUTOR_SHUTDOWN_TIMEOUT_MS = 5000;
 
     // ==================== Constants ====================
@@ -230,7 +230,7 @@ public class DeviceDiscovery implements IHciCommandListener, Closeable {
     // ==================== Constructor ====================
 
     /**
-     * Creates a scanner manager.
+     * Creates a device discovery manager.
      *
      * @param hci HCI command manager (must not be null)
      * @throws NullPointerException if hci is null

@@ -382,6 +382,39 @@ public final class HciCommands {
         return buildCommand(0x0434, buf.array());
     }
 
+    /**
+     * HCI_Remote_OOB_Data_Request_Reply (0x0430).
+     *
+     * @param bdAddr 6-byte Bluetooth address
+     * @param c      Simple Pairing Hash C (16 bytes)
+     * @param r      Simple Pairing Randomizer R (16 bytes)
+     */
+    public static byte[] remoteOobDataRequestReply(byte[] bdAddr, byte[] c, byte[] r) {
+        validateBdAddr(bdAddr);
+        Objects.requireNonNull(c, "c must not be null");
+        Objects.requireNonNull(r, "r must not be null");
+        if (c.length != 16) throw new IllegalArgumentException("c must be 16 bytes");
+        if (r.length != 16) throw new IllegalArgumentException("r must be 16 bytes");
+        ByteBuffer buf = ByteBuffer.allocate(38).order(ByteOrder.LITTLE_ENDIAN);
+        buf.put(bdAddr);
+        buf.put(c);
+        buf.put(r);
+        return buildCommand(0x0430, buf.array());
+    }
+
+    /**
+     * HCI_Remote_OOB_Data_Request_Negative_Reply (0x0433).
+     *
+     * <p>Sent when OOB data is not available for the requesting device.
+     * The controller will continue pairing without OOB data.
+     *
+     * @param bdAddr 6-byte Bluetooth address
+     */
+    public static byte[] remoteOobDataRequestNegativeReply(byte[] bdAddr) {
+        validateBdAddr(bdAddr);
+        return buildCommand(0x0433, bdAddr);
+    }
+
     // ========== LE Controller Commands (OGF 0x08) ==========
 
     /**

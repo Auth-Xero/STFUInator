@@ -70,6 +70,8 @@ public class HidDevice {
     private volatile int supervisionTimeout;
     private volatile boolean normallyConnectable;
     private volatile boolean supportsBootProtocol;
+    private volatile int deviceReleaseVersion;
+    private volatile int parserVersion;
 
     // HID Descriptor
     private volatile byte[] reportDescriptor;
@@ -214,6 +216,12 @@ public class HidDevice {
     public boolean isSupportsBootProtocol() { return supportsBootProtocol; }
     public void setSupportsBootProtocol(boolean supports) { this.supportsBootProtocol = supports; }
 
+    public int getDeviceReleaseVersion() { return deviceReleaseVersion; }
+    public void setDeviceReleaseVersion(int version) { this.deviceReleaseVersion = version; }
+
+    public int getParserVersion() { return parserVersion; }
+    public void setParserVersion(int version) { this.parserVersion = version; }
+
     // ==================== Device Type Helpers ====================
 
     public boolean isKeyboard() {
@@ -357,6 +365,9 @@ public class HidDevice {
         sb.append("  State: ").append(state.get()).append("\n");
         sb.append("  Protocol: ").append(getProtocolModeName()).append("\n");
         sb.append("  Profile Version: ").append(getProfileVersionString()).append("\n");
+        if (deviceReleaseVersion != 0) {
+            sb.append("  Device Release: 0x").append(Integer.toHexString(deviceReleaseVersion)).append("\n");
+        }
         sb.append("  Capabilities: VirtualCable=").append(supportsVirtualCable);
         sb.append(", RemoteWake=").append(supportsRemoteWake);
         sb.append(", BootProtocol=").append(supportsBootProtocol).append("\n");

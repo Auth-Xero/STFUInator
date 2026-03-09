@@ -55,6 +55,7 @@ public class GattManager implements IL2capListener {
         int endHandle;
         UUID uuid;
         int currentServiceIndex;
+        int currentCharIndex;  // Track which characteristic we're discovering descriptors for
         GattCallback.Operation callback;
         GattCallback.Discovery discoveryCallback;
 
@@ -419,7 +420,10 @@ public class GattManager implements IL2capListener {
                     ByteBuffer pdu = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN);
                     pdu.put((byte) ATT_FIND_INFORMATION_REQ).putShort((short) startH).putShort((short) endH);
                     PendingOperation op = new PendingOperation(ATT_FIND_INFORMATION_REQ);
-                    op.startHandle = startH; op.endHandle = endH; op.currentServiceIndex = serviceIndex; op.discoveryCallback = callback;
+                    op.startHandle = startH; op.endHandle = endH;
+                    op.currentServiceIndex = serviceIndex;
+                    op.currentCharIndex = charIndex;  // Track current characteristic
+                    op.discoveryCallback = callback;
                     state.pendingOperation = op;
                     sendAttPdu(conn.connectionHandle, pdu.array());
                     return;
@@ -478,7 +482,8 @@ public class GattManager implements IL2capListener {
                 } else if (ds == GattConnection.DiscoveryState.DISCOVERING_CHARACTERISTICS) {
                     discoverCharacteristics(state, op.currentServiceIndex + 1, op.discoveryCallback);
                 } else if (ds == GattConnection.DiscoveryState.DISCOVERING_DESCRIPTORS) {
-                    discoverDescriptors(state, op.currentServiceIndex, 0, op.discoveryCallback);
+                    // Move to next characteristic (currentCharIndex + 1)
+                    discoverDescriptors(state, op.currentServiceIndex, op.currentCharIndex + 1, op.discoveryCallback);
                 }
             } else {
                 conn.setDiscoveryState(GattConnection.DiscoveryState.FAILED);
@@ -578,6 +583,9 @@ public class GattManager implements IL2capListener {
             pdu.put((byte) ATT_FIND_INFORMATION_REQ).putShort((short)(lastHandle + 1)).putShort((short) op.endHandle);
             op.startHandle = lastHandle + 1;
             sendAttPdu(conn.connectionHandle, pdu.array());
+        } else if (op.discoveryCallback != null) {
+            // Descriptor discovery complete for this characteristic, move to next
+            discoverDescriptors(state, op.currentServiceIndex, op.currentCharIndex + 1, op.discoveryCallback);
         }
     }
 

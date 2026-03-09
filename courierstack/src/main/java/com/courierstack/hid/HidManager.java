@@ -113,6 +113,9 @@ public class HidManager implements Closeable {
     private final Map<String, PendingTransaction> mPendingTransactions;
     private final AtomicInteger mTransactionIdGenerator;
 
+    // DATA continuation reassembly buffers (deviceId -> buffer)
+    private final Map<String, java.io.ByteArrayOutputStream> mReassemblyBuffers;
+
     // Reconnection state
     private final Map<String, ReconnectInfo> mReconnectInfo;
 
@@ -248,6 +251,7 @@ public class HidManager implements Closeable {
         mDevicesByInterruptCid = new ConcurrentHashMap<>();
         mPendingConnections = new ConcurrentHashMap<>();
         mPendingTransactions = new ConcurrentHashMap<>();
+        mReassemblyBuffers = new ConcurrentHashMap<>();
         mReconnectInfo = new ConcurrentHashMap<>();
         mTransactionIdGenerator = new AtomicInteger(1);
 
@@ -935,30 +939,22 @@ public class HidManager implements Closeable {
         byte[] data = new byte[]{header};
 
         mL2capManager.sendData(controlChannel, data);
-        boolean sent = true;
 
-        if (sent) {
-            // Handle local state changes
-            switch (operation) {
-                case HidConstants.CTRL_SUSPEND:
-                    device.setSuspended(true);
-                    mExecutor.execute(() -> {
-                        notifyDeviceSuspended(device);
-                    });
-                    break;
-                case HidConstants.CTRL_EXIT_SUSPEND:
-                    device.setSuspended(false);
-                    mExecutor.execute(() -> {
-                        notifyDeviceResumed(device);
-                    });
-                    break;
-                case HidConstants.CTRL_VIRTUAL_CABLE_UNPLUG:
-                    // Device will disconnect
-                    break;
-            }
+        // Handle local state changes
+        switch (operation) {
+            case HidConstants.CTRL_SUSPEND:
+                device.setSuspended(true);
+                mExecutor.execute(() -> notifyDeviceSuspended(device));
+                break;
+            case HidConstants.CTRL_EXIT_SUSPEND:
+                device.setSuspended(false);
+                mExecutor.execute(() -> notifyDeviceResumed(device));
+                break;
+            case HidConstants.CTRL_VIRTUAL_CABLE_UNPLUG:
+                break;
         }
 
-        return sent;
+        return true;
     }
 
     /**
@@ -1110,6 +1106,7 @@ public class HidManager implements Closeable {
             pending.complete();
         }
         mPendingTransactions.clear();
+        mReassemblyBuffers.clear();
 
         // Cancel all reconnects
         for (String deviceId : new ArrayList<>(mReconnectInfo.keySet())) {
@@ -1350,23 +1347,26 @@ public class HidManager implements Closeable {
     private void cleanupDevice(HidDevice device) {
         String deviceId = device.getDeviceId();
 
+        // Read channels before clearing them
+        L2capChannel control = device.getControlChannel();
+        L2capChannel interrupt = device.getInterruptChannel();
+        AclConnection acl = device.getAclConnection();
+
         device.setState(HidDevice.State.DISCONNECTED);
         device.setControlChannel(null);
         device.setInterruptChannel(null);
 
         mDevices.remove(deviceId);
+        mReassemblyBuffers.remove(deviceId);
 
-        AclConnection acl = device.getAclConnection();
         if (acl != null) {
             mDevicesByHandle.remove(acl.handle);
         }
 
-        L2capChannel control = device.getControlChannel();
         if (control != null) {
             mDevicesByControlCid.remove(control.localCid);
         }
 
-        L2capChannel interrupt = device.getInterruptChannel();
         if (interrupt != null) {
             mDevicesByInterruptCid.remove(interrupt.localCid);
         }
@@ -1449,7 +1449,6 @@ public class HidManager implements Closeable {
                 break;
 
             case HidConstants.TRANS_DATC:
-                // Continuation data - would need fragmentation support
                 handleDataContinuation(device, data);
                 break;
 
@@ -1533,6 +1532,9 @@ public class HidManager implements Closeable {
             return;
         }
 
+        // Flush any previous incomplete reassembly
+        mReassemblyBuffers.remove(device.getDeviceId());
+
         // Check for pending GET_REPORT
         String key = device.getDeviceId() + ":" + HidConstants.TRANS_GET_REPORT;
         PendingTransaction pending = mPendingTransactions.remove(key);
@@ -1558,8 +1560,47 @@ public class HidManager implements Closeable {
     }
 
     private void handleDataContinuation(HidDevice device, byte[] data) {
-        // Fragmentation support would go here
-        notifyMessage("Received DATA continuation (fragmentation not fully implemented)");
+        if (data.length < 2) {
+            return;
+        }
+
+        String deviceId = device.getDeviceId();
+
+        // Append continuation data to reassembly buffer
+        java.io.ByteArrayOutputStream buffer = mReassemblyBuffers.computeIfAbsent(
+                deviceId, k -> new java.io.ByteArrayOutputStream());
+        buffer.write(data, 1, data.length - 1);
+
+        // Check if there's a pending GET_REPORT expecting more data
+        String key = deviceId + ":" + HidConstants.TRANS_GET_REPORT;
+        PendingTransaction pending = mPendingTransactions.get(key);
+        if (pending == null) {
+            // No pending transaction; the next DATA will flush the buffer
+            return;
+        }
+
+        // Determine if this is the last fragment by checking if the payload
+        // is smaller than the L2CAP MTU (indicating it's the final segment)
+        L2capChannel controlChannel = device.getControlChannel();
+        int mtu = (controlChannel != null) ? controlChannel.getEffectiveMtu() : 672;
+
+        if (data.length < mtu) {
+            // Last fragment — reassembly complete
+            mPendingTransactions.remove(key);
+            pending.complete();
+
+            byte[] reassembled = buffer.toByteArray();
+            mReassemblyBuffers.remove(deviceId);
+
+            int reportType = HidConstants.getParameter(data[0]) & 0x03;
+            boolean usesReportId = device.usesReportIds();
+            HidReport report = HidReport.fromWireFormat(reportType, reassembled, usesReportId);
+
+            notifyGetReportComplete(device, report, true);
+            if (pending.callback != null) {
+                pending.callback.onComplete(true, HidConstants.HANDSHAKE_SUCCESSFUL, reassembled);
+            }
+        }
     }
 
     private void handleInterruptData(HidDevice device, byte[] data) {
@@ -1994,8 +2035,6 @@ public class HidManager implements Closeable {
     private void parseSdpAttributes(HidDevice device, byte[] data) {
         ByteBuffer buffer = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
 
-        // This is a simplified parser - real implementation would need
-        // full SDP data element parsing
         int pos = 0;
         while (pos < data.length - 4) {
             // Look for attribute IDs
@@ -2004,11 +2043,17 @@ public class HidManager implements Closeable {
 
                 switch (attrId) {
                     case HidConstants.SDP_ATTR_HID_DEVICE_RELEASE:
-                        // Parse version
+                        if (pos + 4 < data.length) {
+                            int version = ((data[pos + 3] & 0xFF) << 8) | (data[pos + 4] & 0xFF);
+                            device.setDeviceReleaseVersion(version);
+                        }
                         break;
 
                     case HidConstants.SDP_ATTR_HID_PARSER_VERSION:
-                        // Parser version
+                        if (pos + 4 < data.length) {
+                            int pVersion = ((data[pos + 3] & 0xFF) << 8) | (data[pos + 4] & 0xFF);
+                            device.setParserVersion(pVersion);
+                        }
                         break;
 
                     case HidConstants.SDP_ATTR_HID_DEVICE_SUBCLASS:
@@ -2087,12 +2132,7 @@ public class HidManager implements Closeable {
      * Parses the HID descriptor list from SDP data.
      */
     private void parseDescriptorList(HidDevice device, byte[] data, int offset) {
-        // Look for the report descriptor within the descriptor list
-        // The descriptor list is a sequence containing descriptor type and descriptor value pairs
-
-        // This is a simplified search - real implementation would properly parse
-        // the SDP data element sequence structure
-
+        // Search for report descriptor type (0x22) within the descriptor list
         int pos = offset;
         while (pos < data.length - 4) {
             // Look for the descriptor type indicator (0x22 = Report descriptor)

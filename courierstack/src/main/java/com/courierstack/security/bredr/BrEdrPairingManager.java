@@ -24,6 +24,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -46,11 +48,25 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
 
     private static final String TAG = "PairingManager";
 
-    /** HCI Event code for PIN_Code_Request. */
+    /**
+     * HCI Event code for PIN_Code_Request.
+     */
     private static final int EVT_PIN_CODE_REQUEST = 0x16;
 
-    /** Executor shutdown timeout (seconds). */
+    /**
+     * Executor shutdown timeout (seconds).
+     */
     private static final int SHUTDOWN_TIMEOUT_SECONDS = 5;
+
+    /**
+     * Session timeout - stale sessions are cleaned up after this period (milliseconds).
+     */
+    private static final long SESSION_TIMEOUT_MS = 60_000; // 60 seconds
+
+    /**
+     * Interval for session timeout cleanup checks (milliseconds).
+     */
+    private static final long SESSION_CLEANUP_INTERVAL_MS = 15_000; // 15 seconds
 
     // ==================== Dependencies ====================
 
@@ -61,7 +77,15 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
     private final SecureRandom mSecureRandom;
     private final CopyOnWriteArrayList<IBrEdrPairingListener> mAdditionalListeners;
 
-    /** SmpManager for CTKD-derived link keys. */
+    /**
+     * Scheduled executor for session timeout cleanup.
+     */
+    private final ScheduledExecutorService mScheduler;
+    private volatile ScheduledFuture<?> mCleanupTask;
+
+    /**
+     * SmpManager for CTKD-derived link keys.
+     */
     private volatile SmpManager mSmpManager;
 
     // ==================== State ====================
@@ -69,10 +93,14 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
     private final AtomicBoolean mInitialized = new AtomicBoolean(false);
     private final AtomicBoolean mClosed = new AtomicBoolean(false);
 
-    /** Active pairing sessions by connection handle. */
+    /**
+     * Active pairing sessions by connection handle.
+     */
     private final Map<Integer, BrEdrPairingSession> mSessions = new ConcurrentHashMap<>();
 
-    /** Bonding database by address string. */
+    /**
+     * Bonding database by address string.
+     */
     private final Map<String, BondingInfo> mBondingDatabase = new ConcurrentHashMap<>();
 
     // ==================== Configuration ====================
@@ -81,13 +109,19 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
     private volatile int mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_MITM_GENERAL_BONDING;
     private volatile boolean mAutoAccept = false;
 
-    /** Default PIN for legacy pairing. */
+    /**
+     * Default PIN for legacy pairing.
+     */
     private volatile String mDefaultPin = "0000";
 
-    /** Force legacy PIN pairing by rejecting SSP. */
+    /**
+     * Force legacy PIN pairing by rejecting SSP.
+     */
     private volatile boolean mForceLegacyPairing = false;
 
-    /** Optional persistent storage for bonding info. */
+    /**
+     * Optional persistent storage for bonding info.
+     */
     private volatile IBondingStorage mBondingStorage;
 
     // ==================== Constructor ====================
@@ -110,6 +144,11 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         });
         mSecureRandom = new SecureRandom();
         mAdditionalListeners = new CopyOnWriteArrayList<>();
+        mScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "PairingManager-Scheduler");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     // ==================== Initialization ====================
@@ -142,6 +181,14 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         }
 
         mListener.onMessage("Pairing Manager initialized");
+
+        // Start periodic session timeout cleanup
+        mCleanupTask = mScheduler.scheduleAtFixedRate(
+                this::cleanupStaleSessions,
+                SESSION_CLEANUP_INTERVAL_MS,
+                SESSION_CLEANUP_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
+
         return true;
     }
 
@@ -297,23 +344,47 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         switch (mode) {
             case JUST_WORKS:
                 mDefaultIoCap = BrEdrPairingConstants.IO_CAP_NO_INPUT_NO_OUTPUT;
-                mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_DEDICATED_BONDING;
+                mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_GENERAL_BONDING;
                 mAutoAccept = true;
+                mForceLegacyPairing = false;
                 break;
             case NUMERIC_COMPARISON:
                 mDefaultIoCap = BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO;
                 mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_MITM_GENERAL_BONDING;
                 mAutoAccept = false;
+                mForceLegacyPairing = false;
                 break;
             case PASSKEY_ENTRY:
                 mDefaultIoCap = BrEdrPairingConstants.IO_CAP_KEYBOARD_ONLY;
                 mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_MITM_GENERAL_BONDING;
                 mAutoAccept = false;
+                mForceLegacyPairing = false;
                 break;
-            default:
+            case LEGACY_PIN:
+                mDefaultIoCap = BrEdrPairingConstants.IO_CAP_NO_INPUT_NO_OUTPUT;
+                mDefaultAuthReq = BrEdrPairingConstants.AUTH_REQ_GENERAL_BONDING;
+                mAutoAccept = true;
+                mForceLegacyPairing = true;
                 break;
         }
     }
+
+    /**
+     * Sets the default PIN for legacy pairing.
+     *
+     * <p>This PIN is automatically sent in response to PIN_Code_Request events
+     * when legacy (non-SSP) pairing is used.
+     *
+     * @param pin PIN string (1-16 characters)
+     * @throws IllegalArgumentException if pin is null, empty, or longer than 16 characters
+     */
+    public void setDefaultPin(String pin) {
+        if (pin == null || pin.isEmpty() || pin.length() > 16) {
+            throw new IllegalArgumentException("PIN must be 1-16 characters");
+        }
+        mDefaultPin = pin;
+    }
+
 
     // ==================== Listener Management ====================
 
@@ -337,7 +408,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         mAdditionalListeners.remove(listener);
     }
 
-    // ==================== Link Key Management ====================
+// ==================== Link Key Management ====================
 
     /**
      * Stores a link key for a device (e.g., derived via CTKD from LE pairing).
@@ -387,7 +458,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         return mBondingDatabase.containsKey(BrEdrPairingConstants.formatAddress(address));
     }
 
-    // ==================== Pairing Operations ====================
+// ==================== Pairing Operations ====================
 
     /**
      * Initiates pairing with a remote device.
@@ -435,9 +506,9 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
      *
      * <p>Use this when you already have an ACL connection and want to pair.
      *
-     * @param address peer Bluetooth address (6 bytes)
+     * @param address          peer Bluetooth address (6 bytes)
      * @param connectionHandle existing ACL connection handle
-     * @param callback callback for pairing result
+     * @param callback         callback for pairing result
      */
     public void requestAuthentication(byte[] address, int connectionHandle, IBrEdrPairingCallback callback) {
         checkInitialized();
@@ -471,9 +542,9 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
      * It is designed for use cases where you already have an ACL connection
      * and want to authenticate before accessing services.
      *
-     * @param address peer Bluetooth address (6 bytes)
+     * @param address          peer Bluetooth address (6 bytes)
      * @param connectionHandle existing ACL connection handle
-     * @param timeoutMs maximum time to wait for pairing (milliseconds)
+     * @param timeoutMs        maximum time to wait for pairing (milliseconds)
      * @return true if pairing succeeded, false otherwise
      */
     public boolean pairDeviceSync(byte[] address, int connectionHandle, long timeoutMs) {
@@ -618,7 +689,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         session.setState(BrEdrPairingState.KEY_ENTERED);
     }
 
-    // ==================== Bonding Database ====================
+// ==================== Bonding Database ====================
 
     /**
      * Returns stored bonding info for address, or null.
@@ -687,7 +758,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         return mSessions.get(connectionHandle);
     }
 
-    // ==================== HCI Event Handling ====================
+// ==================== HCI Event Handling ====================
 
     @Override
     public void onEvent(byte[] event) {
@@ -739,6 +810,9 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
                 break;
             case EVT_PIN_CODE_REQUEST:
                 handlePinCodeRequest(data);
+                break;
+            case BrEdrPairingConstants.EVT_REMOTE_OOB_DATA_REQUEST:
+                handleRemoteOobDataRequest(data);
                 break;
         }
     }
@@ -1013,7 +1087,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
             if (info == null) {
                 info = BondingInfo.builder()
                         .address(session.getPeerAddress())
-                        .linkKey(session.linkKey)
+                        .linkKey(session.getLinkKey())
                         .linkKeyType(session.linkKeyType)
                         .authenticated(session.authenticated)
                         .build();
@@ -1101,6 +1175,26 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         }
     }
 
+    /**
+     * Handles Remote_OOB_Data_Request event.
+     *
+     * <p>Since OOB data is not currently supported, we respond with a negative
+     * reply which causes the controller to continue pairing without OOB data
+     * (falling back to standard SSP association model).
+     */
+    private void handleRemoteOobDataRequest(byte[] data) {
+        if (data.length < 6) return;
+        byte[] addr = Arrays.copyOfRange(data, 0, 6);
+        String addrStr = BrEdrPairingConstants.formatAddress(addr);
+
+        mListener.onMessage("Remote OOB Data Request from " + addrStr + " - OOB not supported, sending negative reply");
+
+        if (mHciManager != null) {
+            byte[] cmd = HciCommands.remoteOobDataRequestNegativeReply(addr);
+            mHciManager.sendCommand(cmd);
+        }
+    }
+
     private void handleLinkKeyNotification(byte[] data) {
         if (data.length < 23) return;
         byte[] addr = Arrays.copyOfRange(data, 0, 6);
@@ -1134,7 +1228,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         BrEdrPairingSession session = mSessions.computeIfAbsent(handle,
                 h -> new BrEdrPairingSession(h, finalAddr));
 
-        System.arraycopy(linkKey, 0, session.linkKey, 0, 16);
+        session.setLinkKey(linkKey);
         session.linkKeyType = keyType;
         session.authenticated = BrEdrPairingConstants.isMitmProtected(keyType);
 
@@ -1197,9 +1291,25 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         }
     }
 
+    /**
+     * Determines the pairing mode from IO capabilities and auth requirements.
+     *
+     * <p>Implements the full IO capability mapping table from Bluetooth Core Spec
+     * v5.3, Vol 3, Part C, Section 5.2.2.6, Table 5.7.
+     *
+     * <p>IO Capability mapping when MITM is required:
+     * <pre>
+     *                   | DisplayOnly | DisplayYesNo | KeyboardOnly | NoInputNoOutput | KeyboardDisplay
+     * DisplayOnly       | JustWorks   | JustWorks    | PasskeyEntry | JustWorks       | PasskeyEntry
+     * DisplayYesNo      | JustWorks   | NumericComp  | PasskeyEntry | JustWorks       | NumericComp
+     * KeyboardOnly      | PasskeyEntry| PasskeyEntry | PasskeyEntry | JustWorks       | PasskeyEntry
+     * NoInputNoOutput   | JustWorks   | JustWorks    | JustWorks    | JustWorks       | JustWorks
+     * KeyboardDisplay   | PasskeyEntry| NumericComp  | PasskeyEntry | JustWorks       | NumericComp
+     * </pre>
+     */
     private void determinePairingMode(BrEdrPairingSession session) {
-        boolean localMitm = (session.localAuthReq & 0x04) != 0;
-        boolean peerMitm = (session.peerAuthReq & 0x04) != 0;
+        boolean localMitm = (session.localAuthReq & 0x01) != 0;
+        boolean peerMitm = (session.peerAuthReq & 0x01) != 0;
         boolean mitm = localMitm || peerMitm;
 
         if (!mitm) {
@@ -1210,37 +1320,79 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         int localIo = session.localIoCap;
         int peerIo = session.peerIoCap;
 
-        if ((localIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
-                localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY) &&
-                (peerIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
-                        peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY)) {
-            session.setMode(BrEdrPairingMode.NUMERIC_COMPARISON);
-        } else if (localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_ONLY ||
-                peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_ONLY) {
-            session.setMode(BrEdrPairingMode.PASSKEY_ENTRY);
-        } else {
+        // If either side has NoInputNoOutput, MITM is impossible => Just Works
+        if (localIo == BrEdrPairingConstants.IO_CAP_NO_INPUT_NO_OUTPUT ||
+                peerIo == BrEdrPairingConstants.IO_CAP_NO_INPUT_NO_OUTPUT) {
             session.setMode(BrEdrPairingMode.JUST_WORKS);
+            return;
         }
+
+        // Both sides have DisplayYesNo or KeyboardDisplay => Numeric Comparison
+        boolean localCanConfirm = (localIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
+                localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+        boolean peerCanConfirm = (peerIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
+                peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+
+        if (localCanConfirm && peerCanConfirm) {
+            session.setMode(BrEdrPairingMode.NUMERIC_COMPARISON);
+            return;
+        }
+
+        // If either side has a keyboard (KeyboardOnly or KeyboardDisplay) and the
+        // other has a display (DisplayOnly, DisplayYesNo, or KeyboardDisplay) => Passkey Entry
+        boolean localHasKeyboard = (localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_ONLY ||
+                localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+        boolean peerHasKeyboard = (peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_ONLY ||
+                peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+        boolean localHasDisplay = (localIo == BrEdrPairingConstants.IO_CAP_DISPLAY_ONLY ||
+                localIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
+                localIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+        boolean peerHasDisplay = (peerIo == BrEdrPairingConstants.IO_CAP_DISPLAY_ONLY ||
+                peerIo == BrEdrPairingConstants.IO_CAP_DISPLAY_YES_NO ||
+                peerIo == BrEdrPairingConstants.IO_CAP_KEYBOARD_DISPLAY);
+
+        if ((localHasKeyboard && peerHasDisplay) || (peerHasKeyboard && localHasDisplay) ||
+                (localHasKeyboard && peerHasKeyboard)) {
+            session.setMode(BrEdrPairingMode.PASSKEY_ENTRY);
+            return;
+        }
+
+        // Fallback: both DisplayOnly => Just Works (no MITM possible)
+        session.setMode(BrEdrPairingMode.JUST_WORKS);
     }
 
-    // ==================== Helper Methods ====================
+// ==================== Helper Methods ====================
 
     private String getEventName(int eventCode) {
         switch (eventCode) {
-            case 0x06: return "Authentication_Complete";
-            case 0x07: return "Remote_Name_Request_Complete";
-            case 0x08: return "Encryption_Change";
-            case 0x16: return "PIN_Code_Request";
-            case 0x17: return "Link_Key_Request";
-            case 0x18: return "Link_Key_Notification";
-            case 0x31: return "IO_Capability_Request";
-            case 0x32: return "IO_Capability_Response";
-            case 0x33: return "User_Confirmation_Request";
-            case 0x34: return "User_Passkey_Request";
-            case 0x35: return "Remote_OOB_Data_Request";
-            case 0x36: return "Simple_Pairing_Complete";
-            case 0x3B: return "User_Passkey_Notification";
-            default: return "Unknown_0x" + Integer.toHexString(eventCode);
+            case 0x06:
+                return "Authentication_Complete";
+            case 0x07:
+                return "Remote_Name_Request_Complete";
+            case 0x08:
+                return "Encryption_Change";
+            case 0x16:
+                return "PIN_Code_Request";
+            case 0x17:
+                return "Link_Key_Request";
+            case 0x18:
+                return "Link_Key_Notification";
+            case 0x31:
+                return "IO_Capability_Request";
+            case 0x32:
+                return "IO_Capability_Response";
+            case 0x33:
+                return "User_Confirmation_Request";
+            case 0x34:
+                return "User_Passkey_Request";
+            case 0x35:
+                return "Remote_OOB_Data_Request";
+            case 0x36:
+                return "Simple_Pairing_Complete";
+            case 0x3B:
+                return "User_Passkey_Notification";
+            default:
+                return "Unknown_0x" + Integer.toHexString(eventCode);
         }
     }
 
@@ -1262,75 +1414,99 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         return null;
     }
 
-    // ==================== Notification Helpers ====================
+// ==================== Notification Helpers ====================
 
     private void notifyPairingStarted(int handle, byte[] addr) {
         mListener.onPairingStarted(handle, addr);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onPairingStarted(handle, addr);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onPairingStarted(handle, addr);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
     private void notifyIoCapabilityRequest(int handle, byte[] addr) {
         mListener.onIoCapabilityRequest(handle, addr);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onIoCapabilityRequest(handle, addr);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onIoCapabilityRequest(handle, addr);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
     private void notifyNumericComparison(int handle, byte[] addr, int value) {
         mListener.onNumericComparison(handle, addr, value);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onNumericComparison(handle, addr, value);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onNumericComparison(handle, addr, value);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
     private void notifyPasskeyRequest(int handle, byte[] addr, boolean display, int passkey) {
         mListener.onPasskeyRequest(handle, addr, display, passkey);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onPasskeyRequest(handle, addr, display, passkey);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onPasskeyRequest(handle, addr, display, passkey);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
     private void notifyPairingComplete(int handle, byte[] addr, boolean success, BondingInfo info) {
         mListener.onPairingComplete(handle, addr, success, info);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onPairingComplete(handle, addr, success, info);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onPairingComplete(handle, addr, success, info);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
     private void notifyPairingFailed(int handle, byte[] addr, int errorCode, String reason) {
         mListener.onPairingFailed(handle, addr, errorCode, reason);
-        for (IBrEdrPairingListener l : mAdditionalListeners) {
-            try {
-                l.onPairingFailed(handle, addr, errorCode, reason);
-            } catch (Exception e) {
-                CourierLogger.e(TAG, "Listener exception", e);
-            }
+        if (!mAdditionalListeners.isEmpty()) {
+            mExecutor.execute(() -> {
+                for (IBrEdrPairingListener l : mAdditionalListeners) {
+                    try {
+                        l.onPairingFailed(handle, addr, errorCode, reason);
+                    } catch (Exception e) {
+                        CourierLogger.e(TAG, "Listener exception", e);
+                    }
+                }
+            });
         }
     }
 
-    // ==================== IL2capListener Implementation ====================
+// ==================== IL2capListener Implementation ====================
 
     @Override
     public void onConnectionComplete(AclConnection conn) {
@@ -1362,7 +1538,7 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         // No action needed
     }
 
-    // ==================== IHciCommandListener Implementation ====================
+// ==================== IHciCommandListener Implementation ====================
 
     @Override
     public void onAclData(byte[] data) {
@@ -1389,7 +1565,42 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         // Forward HCI messages to listener
     }
 
-    // ==================== Closeable Implementation ====================
+// ==================== Session Timeout ====================
+
+    /**
+     * Cleans up stale pairing sessions that have exceeded the timeout.
+     *
+     * <p>Sessions in active (non-terminal) states that have been running
+     * longer than SESSION_TIMEOUT_MS are failed and removed. This prevents
+     * resource leaks when the peer disconnects without completing pairing.
+     */
+    private void cleanupStaleSessions() {
+        try {
+            long now = System.currentTimeMillis();
+            for (Map.Entry<Integer, BrEdrPairingSession> entry : mSessions.entrySet()) {
+                BrEdrPairingSession session = entry.getValue();
+                if (session.isActive() && session.getElapsedTime() > SESSION_TIMEOUT_MS) {
+                    int handle = entry.getKey();
+                    CourierLogger.w(TAG, "Session timed out: " + session);
+                    session.setState(BrEdrPairingState.FAILED);
+
+                    if (session.callback != null) {
+                        IBrEdrPairingCallback cb = session.callback;
+                        session.callback = null;
+                        cb.onPairingComplete(false, null);
+                    }
+
+                    notifyPairingFailed(handle, session.getPeerAddress(), 0,
+                            "Pairing timed out after " + SESSION_TIMEOUT_MS + "ms");
+                    mSessions.remove(handle);
+                }
+            }
+        } catch (Exception e) {
+            CourierLogger.e(TAG, "Error during session cleanup", e);
+        }
+    }
+
+// ==================== Closeable Implementation ====================
 
     @Override
     public void close() {
@@ -1398,6 +1609,25 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
         }
 
         CourierLogger.i(TAG, "Closing PairingManager");
+
+        // Cancel cleanup task
+        if (mCleanupTask != null) {
+            mCleanupTask.cancel(false);
+        }
+
+        // Fail any active sessions with callbacks
+        for (Map.Entry<Integer, BrEdrPairingSession> entry : mSessions.entrySet()) {
+            BrEdrPairingSession session = entry.getValue();
+            if (session.callback != null) {
+                IBrEdrPairingCallback cb = session.callback;
+                session.callback = null;
+                try {
+                    cb.onPairingComplete(false, null);
+                } catch (Exception e) {
+                    CourierLogger.e(TAG, "Callback exception during close", e);
+                }
+            }
+        }
 
         // Clean up sessions
         mSessions.clear();
@@ -1408,14 +1638,19 @@ public class BrEdrPairingManager implements IL2capListener, IHciCommandListener,
             mHciManager.removeListener(this);
         }
 
-        // Shutdown executor
+        // Shutdown executors
+        mScheduler.shutdown();
         mExecutor.shutdown();
         try {
             if (!mExecutor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 mExecutor.shutdownNow();
             }
+            if (!mScheduler.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                mScheduler.shutdownNow();
+            }
         } catch (InterruptedException e) {
             mExecutor.shutdownNow();
+            mScheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
 

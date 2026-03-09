@@ -107,6 +107,9 @@ public final class BrEdrPairingConstants {
     /** Simple Pairing Complete event. */
     public static final int EVT_SIMPLE_PAIRING_COMPLETE = 0x36;
 
+    /** Remote OOB Data Request event. */
+    public static final int EVT_REMOTE_OOB_DATA_REQUEST = 0x35;
+
     // ==================== Error Codes ====================
 
     /** Pairing not allowed. */

@@ -30,6 +30,8 @@ android {
 
 dependencies {
     implementation("androidx.core:core:1.12.0")
+
+    implementation("org.bouncycastle:bcprov-jdk18on:1.77")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
 }

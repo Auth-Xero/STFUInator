@@ -1,36 +1,31 @@
 package com.courierstack.l2cap;
 
 /**
- * Callback interface for L2CAP connection results.
+ * Callback for asynchronous L2CAP connection operations.
  *
- * <p>This callback is used for asynchronous connection operations.
- * Either {@link #onSuccess} or {@link #onFailure} will be called
- * exactly once.
+ * <p>Either {@link #onSuccess} or {@link #onFailure} will be called
+ * exactly once per operation.
  *
- * <p>Thread safety: Callbacks may be invoked from any thread.
+ * <p>Thread Safety: Callbacks may be invoked from any thread.
  */
 public interface IL2capConnectionCallback {
 
     /**
-     * Called when connection succeeds.
+     * Called when the connection or channel is successfully established.
      *
-     * <p>For ACL connection requests, the channel parameter may be
-     * a placeholder channel with localCid=0. Use the connection
-     * property to access the ACL connection.
-     *
-     * @param channel the connected channel (or placeholder for ACL)
+     * @param channel the resulting L2CAP channel
      */
     void onSuccess(L2capChannel channel);
 
     /**
-     * Called when connection fails.
+     * Called when the connection or channel operation fails.
      *
-     * @param reason human-readable failure description
+     * @param reason failure description
      */
     void onFailure(String reason);
 
     /**
-     * Creates a simple callback from lambda expressions.
+     * Creates a callback from lambda expressions.
      *
      * @param onSuccess success handler
      * @param onFailure failure handler
@@ -42,16 +37,12 @@ public interface IL2capConnectionCallback {
         return new IL2capConnectionCallback() {
             @Override
             public void onSuccess(L2capChannel channel) {
-                if (onSuccess != null) {
-                    onSuccess.accept(channel);
-                }
+                if (onSuccess != null) onSuccess.accept(channel);
             }
 
             @Override
             public void onFailure(String reason) {
-                if (onFailure != null) {
-                    onFailure.accept(reason);
-                }
+                if (onFailure != null) onFailure.accept(reason);
             }
         };
     }

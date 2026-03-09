@@ -314,7 +314,7 @@ public class DiscoveredDevice {
 
     @Override
     public String toString() {
-        StringBuilder sb = new StringBuilder("ScannedDevice{");
+        StringBuilder sb = new StringBuilder("DiscoveredDevice{");
         sb.append("addr=").append(address);
         if (name != null) {
             sb.append(", name='").append(name).append('\'');

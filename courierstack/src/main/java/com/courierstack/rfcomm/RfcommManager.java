@@ -485,9 +485,15 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
 
     // ==================== Data Transfer ====================
 
+    /** Maximum time to wait for credits before dropping data (ms). */
+    private static final int CREDIT_WAIT_TIMEOUT_MS = 5000;
+    private static final int CREDIT_POLL_INTERVAL_MS = 50;
+
     /**
      * Sends data on an RFCOMM channel.
      * Data is fragmented according to the negotiated frame size.
+     * If credit-based flow control is enabled and credits are exhausted,
+     * waits up to {@value #CREDIT_WAIT_TIMEOUT_MS}ms for credits before dropping.
      *
      * @param channel channel to send on
      * @param data    data to send
@@ -505,8 +511,25 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
             int offset = 0;
             while (offset < data.length) {
                 if (channel.isCreditBasedFlowEnabled() && channel.getRemoteCredits() <= 0) {
-                    mListener.onMessage("Waiting for credits on DLCI " + channel.dlci);
-                    return; // TODO: implement blocking/queueing
+                    // Wait for credits with timeout
+                    long deadline = System.currentTimeMillis() + CREDIT_WAIT_TIMEOUT_MS;
+                    while (channel.getRemoteCredits() <= 0
+                            && channel.getState() == RfcommChannelState.CONNECTED) {
+                        if (System.currentTimeMillis() >= deadline) {
+                            mListener.onError("Credit wait timeout on DLCI " + channel.dlci
+                                    + "; data dropped (" + (data.length - offset) + " bytes remaining)");
+                            return;
+                        }
+                        try {
+                            Thread.sleep(CREDIT_POLL_INTERVAL_MS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                    if (channel.getState() != RfcommChannelState.CONNECTED) {
+                        return;
+                    }
                 }
 
                 int chunkSize = Math.min(channel.getFrameSize(), data.length - offset);
@@ -749,8 +772,17 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
         if (data != null && dataLen > 0) frame.put(data);
 
         byte[] frameData = frame.array();
-        int fcsEnd = (type == RfcommConstants.FRAME_UIH) ? 3 : Math.min(3, frameData.length);
-        if (frameData.length > 3 && (frameData[2] & 0x01) == 0) fcsEnd = 4;
+        // Per TS 27.010 Section 5.2.1.6:
+        // UIH: FCS over address + control (2 bytes)
+        // Other frames: FCS over address + control + length (3 or 4 bytes)
+        int fcsEnd;
+        if (type == RfcommConstants.FRAME_UIH) {
+            fcsEnd = 2;
+        } else if (frameData.length > 3 && (frameData[2] & 0x01) == 0) {
+            fcsEnd = 4; // 2-byte length field
+        } else {
+            fcsEnd = 3; // 1-byte length field
+        }
         byte fcs = calculateFcs(frameData, 0, fcsEnd);
 
         byte[] pkt = new byte[frameData.length + 1];
@@ -868,9 +900,17 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
             System.arraycopy(data, offset, info, 0, length);
         }
 
-        // Verify FCS
-        int fcsEnd = (frameType == RfcommConstants.FRAME_UIH) ? 2 : offset;
-        if (data.length > 3 && (data[2] & 0x01) == 0) fcsEnd = Math.max(fcsEnd, 4);
+        // Verify FCS (TS 27.010 Section 5.2.1.6)
+        // UIH: FCS over address + control (2 bytes)
+        // Other frames: FCS over address + control + length (3 or 4 bytes)
+        int fcsEnd;
+        if (frameType == RfcommConstants.FRAME_UIH) {
+            fcsEnd = 2;
+        } else if (data.length > 3 && (data[2] & 0x01) == 0) {
+            fcsEnd = 4; // 2-byte length field
+        } else {
+            fcsEnd = 3; // 1-byte length field
+        }
         byte expectedFcs = calculateFcs(data, 0, fcsEnd);
         byte actualFcs = data[data.length - 1];
         if (expectedFcs != actualFcs) {
@@ -907,7 +947,6 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
             MuxState state = session.getState();
             if (state == MuxState.CLOSED || state == MuxState.CONNECTING) {
                 session.setState(MuxState.OPEN);
-                // Note: When responding to SABM, we become the responder
                 sendUaFrame(session, 0);
                 mListener.onMessage("Mux opened (responder)");
             }
@@ -1355,8 +1394,8 @@ public class RfcommManager implements IL2capListener, IL2capServerListener, Clos
             mSdpManager.shutdown();
         }
 
-        // Shutdown L2CAP
-        mL2capManager.shutdown();
+        // Close L2CAP
+        mL2capManager.close();
 
         // Shutdown executor
         mExecutor.shutdown();

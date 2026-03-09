@@ -849,15 +849,9 @@ public class L2capManager implements IHciCommandListener, Closeable {
     /**
      * Handles HCI Connection_Request event (0x04).
      *
-     * <p>This event is sent by the controller when a remote device wants to
-     * create an ACL connection. We must respond with Accept_Connection_Request
-     * or Reject_Connection_Request within the connection accept timeout.
-     *
-     * @param event HCI event data
+     * <p>Accepts incoming ACL connections as Slave role.
      */
     private void handleHciConnectionRequest(byte[] event) {
-        // Event format: [event_code(1), length(1), BD_ADDR(6), CoD(3), link_type(1)]
-        // Total: 12 bytes
         if (event.length < 12) return;
 
         byte[] addr = new byte[6];
@@ -870,15 +864,13 @@ public class L2capManager implements IHciCommandListener, Closeable {
         CourierLogger.i(TAG, "Connection Request: addr=" + addrStr +
                 ", CoD=0x" + Integer.toHexString(cod) + ", linkType=" + linkType);
 
-        // Accept the connection as Slave (role = 0x01)
-        // Role: 0x00 = Master, 0x01 = Slave
-        // For HID devices, we typically accept as Slave since the host initiates
+        // Accept the connection as Slave
         byte[] cmd = new byte[10];
         cmd[0] = 0x09;  // Accept_Connection_Request opcode LSB
-        cmd[1] = 0x04;  // Accept_Connection_Request opcode MSB (OGF=1, OCF=0x009)
+        cmd[1] = 0x04;  // Accept_Connection_Request opcode MSB
         cmd[2] = 7;     // Parameter length
-        System.arraycopy(addr, 0, cmd, 3, 6);  // BD_ADDR
-        cmd[9] = 0x01;  // Role = Slave
+        System.arraycopy(addr, 0, cmd, 3, 6);
+        cmd[9] = 0x01;  // Role: Slave
 
         if (mHciManager != null) {
             mHciManager.sendCommand(cmd);
@@ -922,38 +914,48 @@ public class L2capManager implements IHciCommandListener, Closeable {
 
         if (subEvent == 0x01 && event.length >= 21) {
             // LE Connection Complete
-            int status = event[3] & 0xFF;
-            int handle = ((event[5] & 0xFF) << 8) | (event[4] & 0xFF);
-            int addrType = event[7] & 0xFF;
-            byte[] addr = new byte[6];
-            System.arraycopy(event, 8, addr, 0, 6);
-            String addrStr = formatAddress(addr);
-
-            IL2capConnectionCallback callback = mPendingAclCallbacks.remove(addrStr);
-
-            if (status == HciErrorCode.SUCCESS) {
-                AclConnection conn = new AclConnection(handle, addr, addrType,
-                        ConnectionType.LE, true);
-                mAclConnections.put(handle, conn);
-
-                mListener.onConnectionComplete(conn);
-                for (IL2capListener l : mAdditionalListeners) {
-                    l.onConnectionComplete(conn);
-                }
-
-                if (callback != null) {
-                    callback.onSuccess(new L2capChannel(0, 0, conn));
-                }
-            } else {
-                String reason = "LE connection failed: " + HciErrorCode.getDescription(status);
-                CourierLogger.w(TAG, reason);
-                if (callback != null) {
-                    callback.onFailure(reason);
-                }
-            }
+            handleLeConnectionComplete(event);
         } else if (subEvent == 0x0A && event.length >= 21) {
             // LE Enhanced Connection Complete (BT 5.0+)
-            handleLeMetaEvent(event); // Same handling
+            // Connection fields (status, handle, role, addr_type, addr) are at
+            // the same offsets as legacy Connection Complete.
+            handleLeConnectionComplete(event);
+        }
+    }
+
+    /**
+     * Handles LE Connection Complete (0x01) and LE Enhanced Connection
+     * Complete (0x0A) events, which share the same field layout.
+     */
+    private void handleLeConnectionComplete(byte[] event) {
+        int status = event[3] & 0xFF;
+        int handle = ((event[5] & 0xFF) << 8) | (event[4] & 0xFF);
+        int addrType = event[7] & 0xFF;
+        byte[] addr = new byte[6];
+        System.arraycopy(event, 8, addr, 0, 6);
+        String addrStr = formatAddress(addr);
+
+        IL2capConnectionCallback callback = mPendingAclCallbacks.remove(addrStr);
+
+        if (status == HciErrorCode.SUCCESS) {
+            AclConnection conn = new AclConnection(handle, addr, addrType,
+                    ConnectionType.LE, true);
+            mAclConnections.put(handle, conn);
+
+            mListener.onConnectionComplete(conn);
+            for (IL2capListener l : mAdditionalListeners) {
+                l.onConnectionComplete(conn);
+            }
+
+            if (callback != null) {
+                callback.onSuccess(new L2capChannel(0, 0, conn));
+            }
+        } else {
+            String reason = "LE connection failed: " + HciErrorCode.getDescription(status);
+            CourierLogger.w(TAG, reason);
+            if (callback != null) {
+                callback.onFailure(reason);
+            }
         }
     }
 
@@ -975,6 +977,22 @@ public class L2capManager implements IHciCommandListener, Closeable {
                             conn.peerAddressType, payload);
                 } catch (Exception e) {
                     CourierLogger.e(TAG, "Fixed channel listener error", e);
+                }
+            }
+        }
+
+        // Notify fixed channel listeners and L2CAP listeners
+        if (L2capConstants.isFixedChannel(cid)) {
+            // Notify primary listener
+            mListener.onFixedChannelData(conn.handle, cid, conn.getPeerAddress(),
+                    conn.peerAddressType, payload);
+            // Notify additional listeners (like GattManager)
+            for (IL2capListener l : mAdditionalListeners) {
+                try {
+                    l.onFixedChannelData(conn.handle, cid, conn.getPeerAddress(),
+                            conn.peerAddressType, payload);
+                } catch (Exception e) {
+                    CourierLogger.e(TAG, "Listener error in onFixedChannelData", e);
                 }
             }
             return;
@@ -1002,8 +1020,9 @@ public class L2capManager implements IHciCommandListener, Closeable {
             if (server != null) {
                 server.onDataReceived(channel, payload);
             }
-        } else if (L2capConstants.isFixedChannel(cid)) {
-            CourierLogger.w(TAG, String.format("No listener for fixed CID 0x%04X", cid));
+        } else {
+            // Unknown CID - not a dynamic channel we know about
+            CourierLogger.d(TAG, String.format("Data received for unknown CID 0x%04X", cid));
         }
     }
 
@@ -1066,8 +1085,6 @@ public class L2capManager implements IHciCommandListener, Closeable {
         }
     }
 
-    // [Continued in next part due to length...]
-
     // ==================== Internal: Signaling Handlers ====================
 
     private void handleConnReq(AclConnection conn, int id, byte[] data) {
@@ -1099,21 +1116,8 @@ public class L2capManager implements IHciCommandListener, Closeable {
                 result = L2capConstants.CR_SUCCESS;
             }
         } else if (psm == L2capConstants.PSM_SDP) {
-            // ========== SDP SPECIAL HANDLING ==========
-            // For SDP requests during pairing, respond with PENDING + Authentication Pending
-            // instead of outright rejection. This prevents some devices from aborting pairing.
-            //
-            // Many Bluetooth devices send an SDP query during the pairing process to discover
-            // services. If we reject this immediately, some devices abort the pairing entirely
-            // with error 0x16 (Connection Terminated By Local Host).
-            //
-            // By responding with PENDING, we give the pairing process time to complete.
-            // The remote device will either:
-            // a) Retry after pairing completes (if SDP server is started)
-            // b) Time out gracefully without affecting pairing
-            //
-            // For best results, start SdpManager.startServer() during initialization.
-            // ==========================================
+            // Respond with PENDING for SDP requests during pairing to avoid
+            // premature disconnection. The remote will retry or time out gracefully.
             localCid = allocateLocalCid();
             result = L2capConstants.CR_PENDING;
             status = L2capConstants.CS_AUTHENTICATION_PENDING;
@@ -1145,8 +1149,8 @@ public class L2capManager implements IHciCommandListener, Closeable {
 
         PendingConnection pending = mPendingConnections.get(id);
 
-        // If not found by id, try to find by localCid (srcCid in response)
-        // Some devices send follow-up SUCCESS with different id after PENDING
+        // If not found by id, try matching by localCid (some devices use
+        // a different id for follow-up SUCCESS after PENDING)
         if (pending == null) {
             for (PendingConnection p : mPendingConnections.values()) {
                 if (p.localCid == srcCid && p.handle == conn.handle) {
@@ -1250,9 +1254,8 @@ public class L2capManager implements IHciCommandListener, Closeable {
         rsp.putShort((short) L2capConstants.CONF_SUCCESS);
         sendL2capData(conn.handle, L2capConstants.CID_SIGNALING, rsp.array());
 
-        // For server (incoming) connections, we also need to send our own Config Request
-        // if we haven't already. L2CAP configuration is bidirectional - both sides must
-        // send a Config Request and receive a Config Response.
+        // Send our Config Request for server (incoming) channels if not already sent.
+        // L2CAP configuration is bidirectional.
         if (!channel.isLocalConfigDone()) {
             CourierLogger.d(TAG, "Sending our Config Request for server channel localCid=0x" +
                     Integer.toHexString(destCid));
@@ -1496,17 +1499,7 @@ public class L2capManager implements IHciCommandListener, Closeable {
     }
 
     /**
-     * Handles L2CAP Information Request.
-     *
-     * Per Bluetooth Core Spec v5.3, Vol 3, Part A, Section 4.10-4.11:
-     * Info Types:
-     *   0x0001 - Connectionless MTU
-     *   0x0002 - Extended Features Supported
-     *   0x0003 - Fixed Channels Supported
-     *
-     * Result:
-     *   0x0000 - Success
-     *   0x0001 - Not Supported
+     * Handles L2CAP Information Request (Section 4.10-4.11).
      */
     private void handleInfoRequest(AclConnection conn, int id, byte[] data) {
         if (data.length < 2) return;
@@ -1529,19 +1522,8 @@ public class L2capManager implements IHciCommandListener, Closeable {
                 break;
 
             case L2capConstants.INFO_EXTENDED_FEATURES:
-                // Extended features mask (4 bytes)
-                // Bit 0: Flow control mode
-                // Bit 1: Retransmission mode
-                // Bit 2: Bi-directional QoS
-                // Bit 3: Enhanced Retransmission Mode
-                // Bit 4: Streaming Mode
-                // Bit 5: FCS Option
-                // Bit 6: Extended Flow Specification for BR/EDR
-                // Bit 7: Fixed Channels
-                // Bit 8: Extended Window Size
-                // Bit 9: Unicast Connectionless Data Reception
-                // We support basic features: Fixed Channels (bit 7)
-                int features = 0x0080;  // Fixed Channels supported
+                // Extended features mask: Fixed Channels supported (bit 7)
+                int features = 0x0080;
                 rsp = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN);
                 rsp.put((byte) L2capConstants.CMD_INFORMATION_RESPONSE);
                 rsp.put((byte) id);
@@ -1552,16 +1534,8 @@ public class L2capManager implements IHciCommandListener, Closeable {
                 break;
 
             case L2capConstants.INFO_FIXED_CHANNELS:
-                // Fixed channels supported (8 bytes bitmask)
-                // Bit 1: L2CAP Signaling channel (CID 0x0001) - always supported
-                // Bit 2: Connectionless reception (CID 0x0002)
-                // Bit 3: AMP Manager (CID 0x0003)
-                // Bit 4: ATT (CID 0x0004)
-                // Bit 5: LE Signaling (CID 0x0005)
-                // Bit 6: SMP (CID 0x0006)
-                // Bit 7: BR/EDR SMP (CID 0x0007)
-                // We support: Signaling (bit 1), ATT (bit 4), SMP (bit 6), BR/EDR SMP (bit 7)
-                long fixedChannels = 0x00000072L;  // Bits 1, 4, 5, 6 = 0x72
+                // Fixed channels bitmask: Signaling, ATT, LE Signaling, SMP
+                long fixedChannels = 0x00000072L;
                 rsp = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
                 rsp.put((byte) L2capConstants.CMD_INFORMATION_RESPONSE);
                 rsp.put((byte) id);
@@ -1600,8 +1574,7 @@ public class L2capManager implements IHciCommandListener, Closeable {
     // ==================== Internal: Helpers ====================
 
     private void sendL2capData(int handle, int cid, byte[] data) {
-        // Build L2CAP PDU: [Length(2)][CID(2)][Payload]
-        // Then wrap in ACL packet: [Handle+Flags(2)][Total Length(2)][L2CAP PDU]
+        // Build ACL packet: [Handle+Flags(2)][Total Length(2)][L2CAP Length(2)][CID(2)][Payload]
         int l2capLength = data.length;
         int totalLength = l2capLength + 4;
 

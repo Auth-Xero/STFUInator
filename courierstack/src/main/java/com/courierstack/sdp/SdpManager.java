@@ -1,7 +1,6 @@
 package com.courierstack.sdp;
 
 import com.courierstack.l2cap.AclConnection;
-import com.courierstack.l2cap.ChannelState;
 import com.courierstack.l2cap.IL2capConnectionCallback;
 import com.courierstack.l2cap.IL2capListener;
 import com.courierstack.l2cap.IL2capServerListener;
@@ -150,6 +149,22 @@ public class SdpManager implements IL2capListener {
     // Service cache by device address and UUID
     private final Map<String, Map<UUID, CachedResult>> mServiceCache = new ConcurrentHashMap<>();
 
+    // Server continuation state: token -> pending response data
+    private final Map<Integer, ServerContinuation> mServerContinuations = new ConcurrentHashMap<>();
+    private final AtomicInteger mContinuationToken = new AtomicInteger(1);
+
+    private static class ServerContinuation {
+        final byte[] data;
+        final int pduId;
+        int offset;
+
+        ServerContinuation(byte[] data, int pduId, int offset) {
+            this.data = data;
+            this.pduId = pduId;
+            this.offset = offset;
+        }
+    }
+
     // ==================== Constructors ====================
 
     /**
@@ -279,6 +294,7 @@ public class SdpManager implements IL2capListener {
         mL2capManager.removeListener(this);
         mPendingQueries.clear();
         mQueryQueueByAddress.clear();
+        mServerContinuations.clear();
 
         mExecutor.shutdown();
         try {
@@ -297,7 +313,6 @@ public class SdpManager implements IL2capListener {
     public boolean isInitialized() {
         return mInitialized.get();
     }
-
 
     // ==================== Service Registration ====================
 
@@ -681,7 +696,7 @@ public class SdpManager implements IL2capListener {
         // Max service record count
         int maxCount = buf.remaining() >= 2 ? buf.getShort() & 0xFFFF : 100;
 
-        // Continuation state (ignored for now - we send complete responses)
+        // Continuation state (not supported; complete responses only)
         int contStateLen = buf.hasRemaining() ? buf.get() & 0xFF : 0;
 
         // Search database
@@ -708,24 +723,39 @@ public class SdpManager implements IL2capListener {
     }
 
     private void handleServiceAttributeRequest(L2capChannel channel, int transactionId, ByteBuffer buf) {
-        // Service record handle
         if (buf.remaining() < 4) {
             sendErrorResponse(channel, transactionId, SdpConstants.ERR_INVALID_PDU_SIZE);
             return;
         }
         int handle = buf.getInt();
 
-        // Max attribute byte count
         int maxBytes = buf.remaining() >= 2 ? buf.getShort() & 0xFFFF : MAX_ATTRIBUTE_BYTE_COUNT;
 
-        // Get record
+        // Skip attribute ID list
+        if (buf.hasRemaining()) {
+            SdpDataElement.skipElement(buf);
+        }
+
+        // Check continuation state
+        int contStateLen = buf.hasRemaining() ? buf.get() & 0xFF : 0;
+        if (contStateLen == 4 && buf.remaining() >= 4) {
+            int token = buf.getInt();
+            ServerContinuation cont = mServerContinuations.remove(token);
+            if (cont != null) {
+                sendAttributeResponseFragment(channel, transactionId, cont.pduId,
+                        cont.data, cont.offset, maxBytes);
+                return;
+            }
+            sendErrorResponse(channel, transactionId, SdpConstants.ERR_INVALID_CONTINUATION_STATE);
+            return;
+        }
+
         ServiceRecord record = mDatabase.getServiceRecord(handle);
         if (record == null) {
             sendErrorResponse(channel, transactionId, SdpConstants.ERR_INVALID_SERVICE_RECORD_HANDLE);
             return;
         }
 
-        // Encode and send
         byte[] encoded = record.encode();
         sendAttributeResponse(channel, transactionId, SdpConstants.SDP_SERVICE_ATTR_RESPONSE,
                 encoded, maxBytes);
@@ -737,6 +767,25 @@ public class SdpManager implements IL2capListener {
 
         // Max attribute byte count
         int maxBytes = buf.remaining() >= 2 ? buf.getShort() & 0xFFFF : MAX_ATTRIBUTE_BYTE_COUNT;
+
+        // Skip attribute ID list
+        if (buf.hasRemaining()) {
+            SdpDataElement.skipElement(buf);
+        }
+
+        // Check continuation state
+        int contStateLen = buf.hasRemaining() ? buf.get() & 0xFF : 0;
+        if (contStateLen == 4 && buf.remaining() >= 4) {
+            int token = buf.getInt();
+            ServerContinuation cont = mServerContinuations.remove(token);
+            if (cont != null) {
+                sendAttributeResponseFragment(channel, transactionId, cont.pduId,
+                        cont.data, cont.offset, maxBytes);
+                return;
+            }
+            sendErrorResponse(channel, transactionId, SdpConstants.ERR_INVALID_CONTINUATION_STATE);
+            return;
+        }
 
         // Search database
         List<Integer> handles = mDatabase.searchByUuidPattern(uuidPattern);
@@ -757,18 +806,33 @@ public class SdpManager implements IL2capListener {
 
     private void sendAttributeResponse(L2capChannel channel, int transactionId, int pduId,
                                        byte[] attrData, int maxBytes) {
-        // For simplicity, send complete response without continuation
-        // A full implementation would fragment large responses
+        sendAttributeResponseFragment(channel, transactionId, pduId, attrData, 0, maxBytes);
+    }
 
-        int attrLen = Math.min(attrData.length, maxBytes);
+    private void sendAttributeResponseFragment(L2capChannel channel, int transactionId, int pduId,
+                                               byte[] attrData, int offset, int maxBytes) {
+        int remaining = attrData.length - offset;
+        int chunkLen = Math.min(remaining, maxBytes);
+        boolean hasMore = (offset + chunkLen) < attrData.length;
 
-        ByteBuffer rsp = ByteBuffer.allocate(8 + attrLen).order(ByteOrder.BIG_ENDIAN);
+        int contStateLen = hasMore ? 4 : 0;
+        int paramLen = 2 + chunkLen + 1 + contStateLen;
+
+        ByteBuffer rsp = ByteBuffer.allocate(5 + paramLen).order(ByteOrder.BIG_ENDIAN);
         rsp.put((byte) pduId);
         rsp.putShort((short) transactionId);
-        rsp.putShort((short) (2 + attrLen + 1)); // Param length
-        rsp.putShort((short) attrLen);
-        rsp.put(attrData, 0, attrLen);
-        rsp.put((byte) 0); // No continuation
+        rsp.putShort((short) paramLen);
+        rsp.putShort((short) chunkLen);
+        rsp.put(attrData, offset, chunkLen);
+
+        if (hasMore) {
+            int token = mContinuationToken.getAndIncrement();
+            mServerContinuations.put(token, new ServerContinuation(attrData, pduId, offset + chunkLen));
+            rsp.put((byte) 4);
+            rsp.putInt(token);
+        } else {
+            rsp.put((byte) 0);
+        }
 
         mL2capManager.sendData(channel, rsp.array());
     }

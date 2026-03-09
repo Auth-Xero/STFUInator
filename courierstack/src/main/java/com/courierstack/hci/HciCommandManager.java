@@ -20,33 +20,17 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * Manager for sending raw HCI commands and receiving responses.
  *
- * <p>This class provides a high-level interface for communicating with the
- * Bluetooth controller via HCI commands. It supports both synchronous and
- * asynchronous command execution.
- *
- * <p>Usage example:
- * <pre>{@code
- * HciCommandManager manager = new HciCommandManager(listener);
- * if (manager.initialize()) {
- *     // Send async command
- *     manager.sendCommand(HciCommandManager.cmdReset());
- *
- *     // Send sync command with timeout
- *     byte[] response = manager.sendCommandSync(HciCommandManager.cmdReadBdAddr());
- *     if (response != null) {
- *         // Process response
- *     }
- * }
- * manager.close();
- * }</pre>
- *
- * <p>Thread safety: This class is thread-safe. Commands may be sent from any thread.
+ * <p>Uses synchronous ACL sends to ensure proper ordering and adds
+ * inter-PDU delay for timing-sensitive protocols like SMP.
  */
 public class HciCommandManager implements IBluetoothHalCallback, Closeable {
 
     private static final String TAG = "HciCommandManager";
     private static final long DEFAULT_TIMEOUT_MS = 5000;
     private static final long EXECUTOR_SHUTDOWN_TIMEOUT_MS = 2000;
+
+    /** Inter-PDU delay for timing-sensitive protocols (ms). */
+    private static final int ACL_SEND_DELAY_MS = 5;
 
     // HCI Event codes
     private static final int EVT_COMMAND_COMPLETE = 0x0E;
@@ -59,15 +43,14 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
     private final ConcurrentHashMap<Integer, PendingCommand> mPendingCommands;
     private final ReentrantLock mSyncCommandLock;
 
+    /** Lock for serializing ACL data sends. */
+    private final ReentrantLock mAclSendLock = new ReentrantLock(true);
+
+    /** Timestamp of last ACL send for inter-PDU pacing. */
+    private volatile long mLastAclSendTime = 0;
+
     private volatile boolean mClosed = false;
 
-    /**
-     * Creates a new HciCommandManager.
-     *
-     * @param listener primary listener for HCI events (must not be null)
-     * @throws NullPointerException if listener is null
-     * @throws IllegalStateException if no HAL is available
-     */
     public HciCommandManager(IHciCommandListener listener) {
         mPrimaryListener = Objects.requireNonNull(listener, "listener must not be null");
         mAdditionalListeners = new CopyOnWriteArrayList<>();
@@ -81,14 +64,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         mHal = IBluetoothHal.create(this);
     }
 
-    /**
-     * Adds an additional listener for HCI events.
-     *
-     * <p>Multiple listeners can be registered to receive callbacks.
-     * The primary listener is always called first.
-     *
-     * @param listener listener to add
-     */
     public void addListener(IHciCommandListener listener) {
         if (listener != null && listener != mPrimaryListener
                 && !mAdditionalListeners.contains(listener)) {
@@ -96,22 +71,10 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         }
     }
 
-    /**
-     * Removes a previously added listener.
-     *
-     * @param listener listener to remove
-     */
     public void removeListener(IHciCommandListener listener) {
         mAdditionalListeners.remove(listener);
     }
 
-    /**
-     * Initializes the HAL and Bluetooth controller.
-     *
-     * <p>This method must be called before sending any commands.
-     *
-     * @return true if initialization succeeded
-     */
     public boolean initialize() {
         if (mHal == null) {
             notifyError("No Bluetooth HAL available");
@@ -141,23 +104,10 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         }
     }
 
-    /**
-     * Returns whether the HAL has been successfully initialized.
-     *
-     * @return true if ready to send commands
-     */
     public boolean isInitialized() {
         return mHal != null && mHal.isInitialized() && !mClosed;
     }
 
-    /**
-     * Sends an HCI command asynchronously.
-     *
-     * <p>The command is queued for transmission. Responses are delivered
-     * via the listener callbacks.
-     *
-     * @param command HCI command packet
-     */
     public void sendCommand(byte[] command) {
         Objects.requireNonNull(command, "command must not be null");
 
@@ -177,16 +127,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         });
     }
 
-    /**
-     * Sends an HCI command synchronously and waits for the response.
-     *
-     * <p>This method blocks until a Command Complete or Command Status event
-     * is received for the command, or the timeout expires.
-     *
-     * @param command   HCI command packet
-     * @param timeoutMs maximum time to wait in milliseconds
-     * @return response event data, or null if timeout or error
-     */
     public byte[] sendCommandSync(byte[] command, long timeoutMs) {
         Objects.requireNonNull(command, "command must not be null");
 
@@ -230,12 +170,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         }
     }
 
-    /**
-     * Sends an HCI command synchronously with the default timeout.
-     *
-     * @param command HCI command packet
-     * @return response event data, or null if timeout or error
-     */
     public byte[] sendCommandSync(byte[] command) {
         return sendCommandSync(command, DEFAULT_TIMEOUT_MS);
     }
@@ -243,9 +177,50 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
     /**
      * Sends ACL data to the controller.
      *
+     * <p>Uses synchronous sending with proper serialization to ensure PDU
+     * ordering, and adds a small delay between sends for timing-sensitive
+     * protocols like SMP.
+     *
      * @param data ACL packet data
      */
     public void sendAclData(byte[] data) {
+        Objects.requireNonNull(data, "data must not be null");
+        if (!checkInitialized()) {
+            return;
+        }
+
+        mAclSendLock.lock();
+        try {
+            // Enforce minimum inter-PDU spacing for timing-sensitive protocols
+            long now = System.currentTimeMillis();
+            long elapsed = now - mLastAclSendTime;
+            if (elapsed < ACL_SEND_DELAY_MS && mLastAclSendTime > 0) {
+                try {
+                    Thread.sleep(ACL_SEND_DELAY_MS - elapsed);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            mHal.sendPacket(HciPacketType.ACL_DATA, data);
+            mLastAclSendTime = System.currentTimeMillis();
+
+        } catch (Exception e) {
+            notifyError("Failed to send ACL data: " + e.getMessage());
+        } finally {
+            mAclSendLock.unlock();
+        }
+    }
+
+    /**
+     * Sends ACL data asynchronously.
+     *
+     * <p>Use for non-timing-sensitive data where ordering is not required.
+     * For ordered/paced sends, use {@link #sendAclData(byte[])} instead.
+     *
+     * @param data ACL packet data
+     */
+    public void sendAclDataAsync(byte[] data) {
         Objects.requireNonNull(data, "data must not be null");
         if (!checkInitialized()) {
             return;
@@ -259,11 +234,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         });
     }
 
-    /**
-     * Sends SCO data to the controller.
-     *
-     * @param data SCO packet data
-     */
     public void sendScoData(byte[] data) {
         Objects.requireNonNull(data, "data must not be null");
         if (!checkInitialized()) {
@@ -278,11 +248,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         });
     }
 
-    /**
-     * Sends ISO data to the controller (Bluetooth 5.2+).
-     *
-     * @param data ISO packet data
-     */
     public void sendIsoData(byte[] data) {
         Objects.requireNonNull(data, "data must not be null");
         if (!checkInitialized()) {
@@ -297,11 +262,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         });
     }
 
-    /**
-     * Closes the manager and releases all resources.
-     *
-     * <p>After calling this method, the manager cannot be used.
-     */
     @Override
     public void close() {
         if (mClosed) {
@@ -309,13 +269,11 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         }
         mClosed = true;
 
-        // Cancel pending commands
         for (PendingCommand pending : mPendingCommands.values()) {
             pending.latch.countDown();
         }
         mPendingCommands.clear();
 
-        // Shutdown executor
         mExecutor.shutdown();
         try {
             if (!mExecutor.awaitTermination(EXECUTOR_SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
@@ -326,7 +284,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
             Thread.currentThread().interrupt();
         }
 
-        // Close HAL
         if (mHal != null) {
             mHal.close();
         }
@@ -334,9 +291,6 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         CourierLogger.i(TAG, "HciCommandManager closed");
     }
 
-    /**
-     * @deprecated Use {@link #close()} instead
-     */
     @Deprecated
     public void shutdown() {
         close();
@@ -377,11 +331,8 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
         }
 
         int eventCode = event[0] & 0xFF;
-
-        // Dispatch raw event to all listeners first
         dispatchEvent(event);
 
-        // Parse and dispatch structured events
         if (eventCode == EVT_COMMAND_COMPLETE && event.length >= 6) {
             handleCommandComplete(event);
         } else if (eventCode == EVT_COMMAND_STATUS && event.length >= 6) {
@@ -390,15 +341,12 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
     }
 
     private void handleCommandComplete(byte[] event) {
-        // Event format: [0x0E, length, numCommands, opcodeLow, opcodeHigh, status, params...]
         int opcode = ((event[4] & 0xFF) << 8) | (event[3] & 0xFF);
         int status = event[5] & 0xFF;
         byte[] returnParams = event.length > 6 ? Arrays.copyOfRange(event, 6, event.length) : new byte[0];
 
-        // Complete pending sync command
         completePendingCommand(opcode, event);
 
-        // Notify listeners
         mPrimaryListener.onCommandComplete(opcode, status, returnParams);
         for (IHciCommandListener listener : mAdditionalListeners) {
             listener.onCommandComplete(opcode, status, returnParams);
@@ -406,14 +354,11 @@ public class HciCommandManager implements IBluetoothHalCallback, Closeable {
     }
 
     private void handleCommandStatus(byte[] event) {
-        // Event format: [0x0F, length, status, numCommands, opcodeLow, opcodeHigh]
         int status = event[2] & 0xFF;
         int opcode = ((event[5] & 0xFF) << 8) | (event[4] & 0xFF);
 
-        // Complete pending sync command
         completePendingCommand(opcode, event);
 
-        // Notify listeners
         mPrimaryListener.onCommandStatus(opcode, status);
         for (IHciCommandListener listener : mAdditionalListeners) {
             listener.onCommandStatus(opcode, status);

@@ -62,7 +62,7 @@ public final class BrEdrPairingSession {
     public volatile int numericValue;
 
     /** Link key (16 bytes). */
-    public final byte[] linkKey = new byte[16];
+    private final byte[] linkKey = new byte[16];
 
     /** Link key type. */
     public volatile int linkKeyType;
@@ -166,6 +166,30 @@ public final class BrEdrPairingSession {
      */
     public String getPeerAddressString() {
         return BrEdrPairingConstants.formatAddress(peerAddress);
+    }
+
+    // ==================== Link Key Accessors ====================
+
+    /**
+     * Returns a copy of the link key.
+     *
+     * @return link key (16 bytes)
+     */
+    public byte[] getLinkKey() {
+        return Arrays.copyOf(linkKey, 16);
+    }
+
+    /**
+     * Sets the link key by copying from the source array.
+     *
+     * @param key source link key (must be 16 bytes)
+     * @throws IllegalArgumentException if key is null or not 16 bytes
+     */
+    public void setLinkKey(byte[] key) {
+        if (key == null || key.length != 16) {
+            throw new IllegalArgumentException("Link key must be 16 bytes");
+        }
+        System.arraycopy(key, 0, linkKey, 0, 16);
     }
 
     // ==================== Utility Methods ====================

